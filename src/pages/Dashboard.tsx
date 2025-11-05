@@ -164,8 +164,8 @@ const DashboardContent = () => {
       const sessionRef = doc(firestore, 'users', user.uid, 'sessions', sessionId);
       await deleteDoc(sessionRef);
 
-      // If the deleted session was active, clear it
-      if (activeSessionId === sessionId) {
+      // If the deleted session was active or was the most recent session, clear it
+      if (activeSessionId === sessionId || mostRecentSessionId === sessionId) {
         setActiveSessionId(null);
       }
 
@@ -247,7 +247,12 @@ const DashboardContent = () => {
           <button
             type="button"
             onClick={handleContinueLastSession}
-            disabled={isLoadingLastSession || isCreatingSession}
+            disabled={
+              isLoadingLastSession ||
+              isCreatingSession ||
+              sessions.length === 0 ||
+              mostRecentSessionId === null
+            }
             className="rounded-full border border-brand-sky px-6 py-3 text-sm font-medium text-brand-sky transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isLoadingLastSession ? 'Loading…' : 'Continue Last Session'}
@@ -436,14 +441,19 @@ const DashboardContent = () => {
               const sessionDate = session.lastUpdated || session.createdAt;
               const isCompleted = session.completed === true;
               const isEditing = editingSessionId === session.id;
-              const isActive = session.id === mostRecentSessionId && !isCompleted;
+              const isActive =
+                mostRecentSessionId !== null && session.id === mostRecentSessionId && !isCompleted;
 
               return (
                 <div
                   key={session.id}
                   className="flex items-center gap-3 rounded-xl border border-brand-mint/60 bg-white p-4 transition hover:border-brand-sky hover:bg-brand-background"
                 >
-                  <button type="button" onClick={handleSessionClick} className="flex-1 text-left">
+                  <button
+                    type="button"
+                    onClick={isEditing ? undefined : handleSessionClick}
+                    className="flex-1 text-left"
+                  >
                     <div className="flex-1">
                       <div className="flex items-center gap-2">
                         {isEditing ? (
@@ -452,6 +462,7 @@ const DashboardContent = () => {
                             value={editingTitle}
                             onChange={(e) => setEditingTitle(e.target.value)}
                             onKeyDown={(e) => {
+                              e.stopPropagation();
                               if (e.key === 'Enter') {
                                 e.preventDefault();
                                 handleRenameSave(session.id);
@@ -459,19 +470,15 @@ const DashboardContent = () => {
                                 handleRenameCancel();
                               }
                             }}
+                            onClick={(e) => e.stopPropagation()}
+                            onKeyUp={(e) => e.stopPropagation()}
                             autoFocus
                             className="flex-1 rounded border border-brand-sky px-2 py-1 text-sm font-semibold text-brand-charcoal focus:outline-none focus:ring-2 focus:ring-brand-sky"
-                            onClick={(e) => e.stopPropagation()}
                           />
                         ) : (
                           <h3 className="text-sm font-semibold text-brand-charcoal">
                             {session.title || 'Untitled Session'}
                           </h3>
-                        )}
-                        {isCompleted && (
-                          <span className="rounded-full bg-brand-mint/40 px-2 py-0.5 text-xs font-medium text-brand-slate">
-                            Completed
-                          </span>
                         )}
                         {isActive && (
                           <span className="rounded-full bg-brand-sky/20 px-2 py-0.5 text-xs font-medium text-brand-sky">

@@ -252,6 +252,12 @@ const ensureSessionExists = async (userId: string) => {
   return newSessionRef.id;
 };
 
+// Helper function to get localStorage key for draft messages
+const getDraftStorageKey = (sessionId: string | null) => {
+  if (!sessionId) return null;
+  return `tutor-draft-${sessionId}`;
+};
+
 const TutorPage = () => {
   const { user } = useAuth();
   const [inputValue, setInputValue] = useState('');
@@ -266,19 +272,18 @@ const TutorPage = () => {
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const creatingSessionRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const isStreamingRef = useRef(false);
+  const pendingMessageIdRef = useRef<string | null>(null);
 
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const setActiveSessionId = useSessionStore((state) => state.setActiveSessionId);
   const messages = useSessionStore((state) => state.messages);
   const setMessages = useSessionStore((state) => state.setMessages);
   const clearMessages = useSessionStore((state) => state.clearMessages);
-  const resetSessionStore = useSessionStore((state) => state.reset);
   const sessionStoreApi = useSessionStoreApi();
 
   const isUploading = useUIStore((state) => state.isUploading);
   const setUploading = useUIStore((state) => state.setUploading);
-
-  useEffect(() => () => resetSessionStore(), [resetSessionStore]);
 
   useEffect(() => {
     document.documentElement.style.overflow = 'hidden';
@@ -289,9 +294,58 @@ const TutorPage = () => {
     };
   }, []);
 
+  // Load draft from localStorage on mount or when session changes
+  useEffect(() => {
+    if (!activeSessionId) {
+      setInputValue('');
+      setPendingImageUrl(null);
+      return;
+    }
+
+    const storageKey = getDraftStorageKey(activeSessionId);
+    if (!storageKey) return;
+
+    try {
+      const savedDraft = localStorage.getItem(storageKey);
+      if (savedDraft) {
+        const draft = JSON.parse(savedDraft) as {
+          inputValue?: string;
+          pendingImageUrl?: string | null;
+        };
+        if (draft.inputValue !== undefined) {
+          setInputValue(draft.inputValue);
+        }
+        if (draft.pendingImageUrl !== undefined) {
+          setPendingImageUrl(draft.pendingImageUrl);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load draft from localStorage', error);
+    }
+  }, [activeSessionId]);
+
+  // Save draft to localStorage when inputValue or pendingImageUrl changes
+  useEffect(() => {
+    if (!activeSessionId) return;
+
+    const storageKey = getDraftStorageKey(activeSessionId);
+    if (!storageKey) return;
+
+    try {
+      const draft = {
+        inputValue,
+        pendingImageUrl,
+      };
+      localStorage.setItem(storageKey, JSON.stringify(draft));
+    } catch (error) {
+      console.error('Failed to save draft to localStorage', error);
+    }
+  }, [activeSessionId, inputValue, pendingImageUrl]);
+
   useEffect(() => {
     if (!user) {
       clearMessages();
+      setActiveSessionId(null);
       setSessions([]);
       setEvaluations({});
       setIsLoading(false);
@@ -404,7 +458,13 @@ const TutorPage = () => {
     const unsubscribe = onSnapshot(
       messagesQuery,
       (snapshot) => {
-        const nextMessages = snapshot.docs.map((docSnapshot) => {
+        // Skip Firestore updates if we're actively streaming
+        // This prevents overwriting pending messages during streaming
+        if (isStreamingRef.current) {
+          return;
+        }
+
+        const firestoreMessages = snapshot.docs.map((docSnapshot) => {
           const data = docSnapshot.data() as {
             role?: string;
             content?: string;
@@ -428,7 +488,202 @@ const TutorPage = () => {
           } satisfies SessionMessage;
         });
 
-        setMessages(nextMessages);
+        // Merge Firestore messages with pending messages (messages with pending: true)
+        // IMPORTANT: Get current messages RIGHT BEFORE setting to include any streaming updates
+        // This preserves pending messages during streaming, but filters out empty ones
+        const currentMessages = sessionStoreApi.getState().messages;
+        const pendingMessages = currentMessages.filter(
+          (msg) =>
+            'pending' in msg &&
+            msg.pending === true &&
+            msg.content &&
+            (msg.content.trim().length > 0 || msg.content === '...'),
+        );
+
+        // During streaming, pending messages should take priority over Firestore messages
+        // We need to preserve pending messages that are actively being streamed
+        const now = Date.now();
+        const pendingMessagesWithContent = pendingMessages.filter((pendingMsg) => {
+          // Always keep pending messages that have substantial content (actively streaming)
+          if (
+            pendingMsg.content &&
+            pendingMsg.content.trim().length > 3 &&
+            pendingMsg.content !== '...'
+          ) {
+            return true;
+          }
+
+          // Keep pending messages that were created recently (within last 60 seconds)
+          // This ensures we keep them during the entire streaming process
+          if (pendingMsg.createdAt) {
+            const age = now - pendingMsg.createdAt.getTime();
+            if (age < 60000) {
+              // Only remove if there's a Firestore message with substantial content
+              const hasSubstantialFirestoreMessage = firestoreMessages.some(
+                (fm) =>
+                  fm.role === 'assistant' &&
+                  fm.content &&
+                  fm.content.trim().length > 3 &&
+                  fm.createdAt &&
+                  pendingMsg.createdAt &&
+                  Math.abs(fm.createdAt.getTime() - pendingMsg.createdAt.getTime()) < 5000,
+              );
+              // Keep pending if no substantial Firestore message exists yet
+              return !hasSubstantialFirestoreMessage;
+            }
+          }
+
+          // For older pending messages, check if Firestore has a matching message
+          const hasMatchingFirestoreMessage = firestoreMessages.some(
+            (fm) =>
+              fm.role === 'assistant' &&
+              fm.content &&
+              fm.content.trim().length > 0 &&
+              fm.createdAt &&
+              pendingMsg.createdAt &&
+              Math.abs(fm.createdAt.getTime() - pendingMsg.createdAt.getTime()) < 5000,
+          );
+
+          // Remove pending message only if Firestore has a matching message with content
+          return !hasMatchingFirestoreMessage;
+        });
+
+        // Combine Firestore messages with pending messages that should be kept
+        const allMessages = [...firestoreMessages, ...pendingMessagesWithContent];
+
+        // Remove duplicates - prefer Firestore messages over pending messages
+        const uniqueMessages = allMessages.filter((msg, index, arr) => {
+          // Filter out empty assistant messages (but allow "..." as pending indicator)
+          if (msg.role === 'assistant') {
+            if (!msg.content || (msg.content.trim().length === 0 && msg.content !== '...')) {
+              return false;
+            }
+          }
+
+          // If this is a Firestore message, check if there's a pending message with the same content
+          // If so, prefer the Firestore message (it's the final version)
+          if (!('pending' in msg) || !msg.pending) {
+            const hasPendingDuplicate = pendingMessagesWithContent.some(
+              (pm) =>
+                pm.role === msg.role &&
+                pm.content === msg.content &&
+                pm.createdAt &&
+                msg.createdAt &&
+                Math.abs(pm.createdAt.getTime() - msg.createdAt.getTime()) < 5000,
+            );
+            // Always prefer Firestore message over pending
+            return true;
+          }
+
+          return true;
+        });
+
+        // Sort by createdAt if available, otherwise keep pending messages at end
+        uniqueMessages.sort((a, b) => {
+          if (a.createdAt && b.createdAt) {
+            return a.createdAt.getTime() - b.createdAt.getTime();
+          }
+          const aPending = 'pending' in a && a.pending;
+          const bPending = 'pending' in b && b.pending;
+          if (aPending && !bPending) return 1;
+          if (!aPending && bPending) return -1;
+          return 0;
+        });
+
+        // Before setting, get the latest pending messages to preserve streaming updates
+        // This ensures we don't overwrite pending messages that were just updated during streaming
+        const latestMessages = sessionStoreApi.getState().messages;
+        const latestPendingMessages = latestMessages.filter(
+          (msg) => 'pending' in msg && msg.pending === true,
+        );
+
+        // Always prefer the latest pending messages (which include streaming updates)
+        // Replace any pending messages in uniqueMessages with the latest versions
+        // Also remove pending messages if we have a matching Firestore message (prevents flicker)
+        latestPendingMessages.forEach((latestPendingMsg) => {
+          if (
+            latestPendingMsg.content &&
+            (latestPendingMsg.content.trim().length > 0 || latestPendingMsg.content === '...')
+          ) {
+            // Check if there's a matching Firestore message (same content, recent timestamp)
+            // Match by content similarity, not exact match, to handle timing differences
+            const matchingFirestoreMessage = firestoreMessages.find(
+              (fm) =>
+                fm.role === 'assistant' &&
+                fm.content &&
+                fm.content.trim().length > 0 &&
+                fm.content.trim() === latestPendingMsg.content.trim() &&
+                fm.createdAt &&
+                latestPendingMsg.createdAt &&
+                Math.abs(fm.createdAt.getTime() - latestPendingMsg.createdAt.getTime()) < 10000, // 10 second window
+            );
+
+            // If we have a matching Firestore message with the same content, replace pending with it
+            // This ensures smooth transition - Firestore message replaces pending seamlessly
+            // Only remove pending if Firestore message is actually in the list
+            if (matchingFirestoreMessage) {
+              const firestoreIndex = uniqueMessages.findIndex(
+                (msg) => msg.id === matchingFirestoreMessage.id,
+              );
+              const pendingIndex = uniqueMessages.findIndex(
+                (msg) => msg.id === latestPendingMsg.id,
+              );
+
+              // If Firestore message is already in the list, remove pending
+              if (firestoreIndex >= 0) {
+                if (pendingIndex >= 0) {
+                  uniqueMessages.splice(pendingIndex, 1);
+                }
+                // Clear the ref when we remove the pending message
+                if (pendingMessageIdRef.current === latestPendingMsg.id) {
+                  pendingMessageIdRef.current = null;
+                }
+                return;
+              }
+              // If Firestore message isn't in list yet, keep pending until it is
+            }
+
+            // Always keep pending messages with final content (more than 3 chars, not "...")
+            // This prevents flicker - pending stays visible until Firestore loads
+            if (
+              latestPendingMsg.content &&
+              latestPendingMsg.content.trim().length > 3 &&
+              latestPendingMsg.content !== '...'
+            ) {
+              const index = uniqueMessages.findIndex((msg) => msg.id === latestPendingMsg.id);
+              if (index >= 0) {
+                // Always use the latest pending message (has final content)
+                uniqueMessages[index] = latestPendingMsg;
+              } else {
+                uniqueMessages.push(latestPendingMsg);
+              }
+              return;
+            }
+
+            const index = uniqueMessages.findIndex((msg) => msg.id === latestPendingMsg.id);
+            if (index >= 0) {
+              // Replace with latest version (has streaming updates)
+              uniqueMessages[index] = latestPendingMsg;
+            } else {
+              // Add if it doesn't exist (preserve streaming updates)
+              uniqueMessages.push(latestPendingMsg);
+            }
+          }
+        });
+
+        // Re-sort after adding/updating pending messages
+        uniqueMessages.sort((a, b) => {
+          if (a.createdAt && b.createdAt) {
+            return a.createdAt.getTime() - b.createdAt.getTime();
+          }
+          const aPending = 'pending' in a && a.pending;
+          const bPending = 'pending' in b && b.pending;
+          if (aPending && !bPending) return 1;
+          if (!aPending && bPending) return -1;
+          return 0;
+        });
+
+        setMessages(uniqueMessages);
       },
       (error) => {
         console.error('Failed to subscribe to messages', error);
@@ -504,13 +759,23 @@ const TutorPage = () => {
 
   const formattedMessages = useMemo<FormattedMessage[]>(
     () =>
-      messages.map((message) => ({
-        ...message,
-        timestamp: message.createdAt
-          ? message.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          : '—',
-        evaluation: evaluations[message.id] ?? null,
-      })),
+      messages
+        .filter((message) => {
+          // Filter out assistant messages that only have "..." as content
+          if (message.role === 'assistant') {
+            if (!message.content || message.content.trim() === '' || message.content === '...') {
+              return false;
+            }
+          }
+          return true;
+        })
+        .map((message) => ({
+          ...message,
+          timestamp: message.createdAt
+            ? message.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : '—',
+          evaluation: evaluations[message.id] ?? null,
+        })),
     [messages, evaluations],
   );
 
@@ -742,20 +1007,11 @@ const TutorPage = () => {
         const tempMessageId = `pending-${Date.now()}`;
         pendingMessageId = tempMessageId;
 
-        // Add pending message to local state
-        const pendingMessage: SessionMessage = {
-          id: tempMessageId,
-          role: 'assistant',
-          content: '',
-          imageUrl: null,
-          topicId: null,
-          createdAt: new Date(),
-          stepType: null,
-          pending: true,
-        };
-        setMessages([...existingMessages, pendingMessage]);
+        // Mark streaming as active
+        isStreamingRef.current = true;
+        pendingMessageIdRef.current = tempMessageId;
 
-        // Start streaming
+        // Start streaming - don't create pending message until we have actual content
         const assistantResult = await callGenerateResponseStream(
           payload,
           mode,
@@ -775,36 +1031,90 @@ const TutorPage = () => {
               streamingStepType = chunk.stepType;
             }
 
-            // Update the pending message in local state (use current messages)
-            if (pendingMessageId) {
+            // Only create/update pending message if we have actual content (not just "...")
+            if (pendingMessageId && streamingContent.trim().length > 0) {
               const currentMessages = sessionStoreApi.getState().messages;
-              const updatedMessages = currentMessages.map((msg) =>
-                msg.id === pendingMessageId
-                  ? { ...msg, content: streamingContent, stepType: streamingStepType }
-                  : msg,
-              );
-              setMessages(updatedMessages);
+              const hasPendingMessage = currentMessages.some((msg) => msg.id === pendingMessageId);
+
+              if (!hasPendingMessage) {
+                // Create pending message now that we have content
+                const pendingMessage: SessionMessage = {
+                  id: pendingMessageId,
+                  role: 'assistant',
+                  content: streamingContent,
+                  imageUrl: null,
+                  topicId: null,
+                  createdAt: new Date(),
+                  stepType: streamingStepType,
+                  pending: true,
+                };
+                setMessages([...currentMessages, pendingMessage]);
+              } else {
+                // Update existing pending message with streaming content
+                const updatedMessages = currentMessages.map((msg) =>
+                  msg.id === pendingMessageId
+                    ? { ...msg, content: streamingContent, stepType: streamingStepType }
+                    : msg,
+                );
+                setMessages(updatedMessages);
+              }
             }
           },
         );
-
-        // Remove pending message from local state
-        const currentMessages = sessionStoreApi.getState().messages;
-        setMessages(currentMessages.filter((msg) => msg.id !== pendingMessageId));
 
         // Finalize: use the final result from streaming
         const finalContent = assistantResult.content || streamingContent;
         const finalStepType: SocraticStepType | null =
           assistantResult.stepType ?? streamingStepType ?? (mode === 'hint' ? 'hint' : null);
 
+        // Only save to Firestore if we have content
+        if (!finalContent.trim()) {
+          console.warn('Assistant response is empty, not saving to Firestore');
+          // Remove pending message immediately if content is empty
+          const currentMessages = sessionStoreApi.getState().messages;
+          setMessages(currentMessages.filter((msg) => msg.id !== pendingMessageId));
+          // Mark streaming as complete
+          isStreamingRef.current = false;
+          pendingMessageIdRef.current = null;
+          return;
+        }
+
+        // Update pending message with final content IMMEDIATELY to prevent flicker
+        // This must happen synchronously before Firestore subscription can fire
+        const currentMessages = sessionStoreApi.getState().messages;
+        const updatedMessages = currentMessages.map((msg) =>
+          msg.id === pendingMessageId
+            ? { ...msg, content: finalContent.trim(), stepType: finalStepType, pending: true }
+            : msg,
+        );
+        setMessages(updatedMessages);
+
         // Create the final message in Firestore
         const finalAssistantDocRef = await addDoc(messagesCollection, {
           role: 'assistant',
-          content: finalContent,
+          content: finalContent.trim(),
           topicId: null,
           stepType: finalStepType,
           createdAt: serverTimestamp(),
         });
+
+        // Wait for React to render the pending message update before allowing Firestore subscription
+        // This prevents flicker by ensuring the final content is visible before Firestore processes
+        await new Promise((resolve) => {
+          // Use requestAnimationFrame to ensure the update is rendered
+          requestAnimationFrame(() => {
+            // Use another frame to ensure React has processed the update
+            requestAnimationFrame(() => {
+              resolve(undefined);
+            });
+          });
+        });
+
+        // Mark streaming as complete AFTER pending message update is rendered
+        // The pending message with final content will stay visible until Firestore subscription
+        // detects the matching message and removes it - this prevents flicker
+        isStreamingRef.current = false;
+        // Keep pendingMessageIdRef so Firestore subscription can match and remove it
 
         if (finalStepType === 'hint') {
           try {
@@ -823,6 +1133,9 @@ const TutorPage = () => {
           const currentMessages = sessionStoreApi.getState().messages;
           setMessages(currentMessages.filter((msg) => msg.id !== pendingMessageId));
         }
+        // Mark streaming as complete
+        isStreamingRef.current = false;
+        pendingMessageIdRef.current = null;
         console.error('Failed to generate assistant response', error);
 
         const fallbackMessage =
@@ -869,6 +1182,18 @@ const TutorPage = () => {
     setPendingImageFile(null);
     setInputValue('');
 
+    // Clear draft from localStorage after sending
+    if (activeSessionId) {
+      const storageKey = getDraftStorageKey(activeSessionId);
+      if (storageKey) {
+        try {
+          localStorage.removeItem(storageKey);
+        } catch (error) {
+          console.error('Failed to clear draft from localStorage', error);
+        }
+      }
+    }
+
     // Send message with image if available
     void sendMessage({
       content: trimmed,
@@ -900,6 +1225,19 @@ const TutorPage = () => {
       : 'Could I have a hint to nudge me forward?';
 
     setInputValue('');
+
+    // Clear draft from localStorage after sending hint
+    if (activeSessionId) {
+      const storageKey = getDraftStorageKey(activeSessionId);
+      if (storageKey) {
+        try {
+          localStorage.removeItem(storageKey);
+        } catch (error) {
+          console.error('Failed to clear draft from localStorage', error);
+        }
+      }
+    }
+
     void sendMessage({ content: hintContent, mode: 'hint', skipEvaluation: true });
   };
 
@@ -967,6 +1305,9 @@ const TutorPage = () => {
     setPendingImageUrl(null);
     setPendingImageFile(null);
     setOcrError(null);
+
+    // Update draft in localStorage (image is removed, but text remains)
+    // This will be handled by the useEffect that saves draft on pendingImageUrl change
   };
 
   if (isLoading) {
@@ -1047,7 +1388,9 @@ const TutorPage = () => {
                           />
                         </div>
                       ) : null}
-                      {message.content ? <MathText content={message.content} /> : null}
+                      {message.content && message.content.trim() && message.content !== '...' ? (
+                        <MathText content={message.content} />
+                      ) : null}
                       {evaluationDetails ? (
                         <span
                           className={`mt-2 block text-xs font-medium ${evaluationDetails.className}`}
