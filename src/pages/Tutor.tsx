@@ -13,7 +13,6 @@ import {
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import { ChangeEvent, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  callGenerateResponse,
   callGenerateResponseStream,
   type ChatMessagePayload,
   type GenerateResponseMode,
@@ -31,6 +30,13 @@ import {
 } from '../context/SessionContext';
 import { useUIStore } from '../context/UIContext';
 import { firestore, storage } from '../firebase';
+import {
+  generateProblem,
+  PROBLEM_TOPICS,
+  DIFFICULTY_OPTIONS,
+  getTopicLabel,
+} from '../utils/problemGenerator';
+import type { GeneratedProblem, ProblemDifficulty } from '../types/problem';
 
 type SessionSummary = {
   id: string;
@@ -38,12 +44,43 @@ type SessionSummary = {
   lastUpdated: Date | null;
   title: string | null;
   topicId: string | null;
+  difficulty?: string | null;
   stats: {
     totalTurns?: number;
     hintsUsed?: number;
     durationSec?: number;
   } | null;
   completed?: boolean;
+};
+
+type PendingGeneratedProblemState = {
+  sessionId: string;
+  problem: GeneratedProblem;
+};
+
+type SendMessageOptions = {
+  content: string;
+  imageUrl?: string | null;
+  mode?: GenerateResponseMode;
+  skipEvaluation?: boolean;
+  topicId?: string | null;
+  difficulty?: string | null;
+};
+
+const isSupportedDifficulty = (value: string | null | undefined): value is ProblemDifficulty =>
+  value === 'beginner' || value === 'intermediate' || value === 'advanced';
+
+const buildGeneratedSessionTitle = (problem: GeneratedProblem): string => {
+  if (problem.title && problem.title.trim().length > 0) {
+    return problem.title.trim();
+  }
+
+  const topicLabel = getTopicLabel(problem.topicId);
+  if (topicLabel) {
+    return `AI Practice — ${topicLabel}`;
+  }
+
+  return 'AI Practice Session';
 };
 
 type FormattedMessage = SessionMessage & {
@@ -269,11 +306,21 @@ const TutorPage = () => {
   const [ocrError, setOcrError] = useState<string | null>(null);
   const [pendingImageUrl, setPendingImageUrl] = useState<string | null>(null);
   const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
+  const [isProblemModalOpen, setProblemModalOpen] = useState(false);
+  const [isGeneratingProblem, setIsGeneratingProblem] = useState(false);
+  const [problemGeneratorError, setProblemGeneratorError] = useState<string | null>(null);
+  const [selectedProblemTopic, setSelectedProblemTopic] = useState<string>('');
+  const [selectedProblemDifficulty, setSelectedProblemDifficulty] =
+    useState<ProblemDifficulty>('intermediate');
+  const [pendingGeneratedProblem, setPendingGeneratedProblem] =
+    useState<PendingGeneratedProblemState | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const creatingSessionRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isStreamingRef = useRef(false);
   const pendingMessageIdRef = useRef<string | null>(null);
+  const sendMessageRef = useRef<((options: SendMessageOptions) => Promise<void>) | null>(null);
+  const previousSessionIdRef = useRef<string | null>(null);
 
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const setActiveSessionId = useSessionStore((state) => state.setActiveSessionId);
@@ -388,6 +435,7 @@ const TutorPage = () => {
             topicId?: unknown;
             stats?: unknown;
             completed?: boolean;
+            difficulty?: unknown;
           };
 
           let normalizedStats: SessionSummary['stats'] = null;
@@ -406,6 +454,8 @@ const TutorPage = () => {
           const rawTitle = typeof data.title === 'string' ? data.title.trim() : '';
           const rawTopic = typeof data.topicId === 'string' ? data.topicId.trim() : '';
           const completed = typeof data.completed === 'boolean' ? data.completed : false;
+          const rawDifficulty =
+            typeof data.difficulty === 'string' ? data.difficulty.trim().toLowerCase() : '';
 
           return {
             id: docSnapshot.id,
@@ -413,6 +463,7 @@ const TutorPage = () => {
             lastUpdated: data.lastUpdated instanceof Timestamp ? data.lastUpdated.toDate() : null,
             title: rawTitle || null,
             topicId: rawTopic || null,
+            difficulty: rawDifficulty || null,
             stats: normalizedStats,
             completed,
           } satisfies SessionSummary;
@@ -470,6 +521,7 @@ const TutorPage = () => {
             content?: string;
             imageUrl?: string | null;
             topicId?: string | null;
+            difficulty?: string | null;
             createdAt?: Timestamp | null;
             stepType?: string | null;
           };
@@ -480,6 +532,7 @@ const TutorPage = () => {
             content: data.content ?? '',
             imageUrl: data.imageUrl ?? null,
             topicId: data.topicId ?? null,
+            difficulty: data.difficulty ?? null,
             createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate() : null,
             stepType:
               data.stepType === 'hint' || data.stepType === 'check' || data.stepType === 'final'
@@ -552,7 +605,7 @@ const TutorPage = () => {
         const allMessages = [...firestoreMessages, ...pendingMessagesWithContent];
 
         // Remove duplicates - prefer Firestore messages over pending messages
-        const uniqueMessages = allMessages.filter((msg, index, arr) => {
+        const uniqueMessages = allMessages.filter((msg) => {
           // Filter out empty assistant messages (but allow "..." as pending indicator)
           if (msg.role === 'assistant') {
             if (!msg.content || (msg.content.trim().length === 0 && msg.content !== '...')) {
@@ -563,15 +616,6 @@ const TutorPage = () => {
           // If this is a Firestore message, check if there's a pending message with the same content
           // If so, prefer the Firestore message (it's the final version)
           if (!('pending' in msg) || !msg.pending) {
-            const hasPendingDuplicate = pendingMessagesWithContent.some(
-              (pm) =>
-                pm.role === msg.role &&
-                pm.content === msg.content &&
-                pm.createdAt &&
-                msg.createdAt &&
-                Math.abs(pm.createdAt.getTime() - msg.createdAt.getTime()) < 5000,
-            );
-            // Always prefer Firestore message over pending
             return true;
           }
 
@@ -691,7 +735,21 @@ const TutorPage = () => {
     );
 
     return () => unsubscribe();
-  }, [activeSessionId, clearMessages, setMessages, user]);
+  }, [activeSessionId, clearMessages, sessionStoreApi, setMessages, user]);
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      previousSessionIdRef.current = null;
+      return;
+    }
+
+    if (previousSessionIdRef.current && previousSessionIdRef.current !== activeSessionId) {
+      clearMessages();
+      setEvaluations({});
+    }
+
+    previousSessionIdRef.current = activeSessionId;
+  }, [activeSessionId, clearMessages, setEvaluations]);
 
   useEffect(() => {
     if (!user || !activeSessionId) {
@@ -793,6 +851,27 @@ const TutorPage = () => {
     return currentSession?.topicId ?? null;
   }, [messages, currentSession]);
 
+  const selectedTopicDetails = useMemo(
+    () => PROBLEM_TOPICS.find((topic) => topic.id === selectedProblemTopic) ?? null,
+    [selectedProblemTopic],
+  );
+
+  const activeTopicLabel = useMemo(() => getTopicLabel(activeTopicId), [activeTopicId]);
+
+  const activeDifficultyLabel = useMemo(() => {
+    if (!currentSession?.difficulty) {
+      return null;
+    }
+
+    const option = DIFFICULTY_OPTIONS.find((item) => item.value === currentSession.difficulty);
+    if (option) {
+      return option.label;
+    }
+
+    const label = currentSession.difficulty;
+    return label.charAt(0).toUpperCase() + label.slice(1);
+  }, [currentSession?.difficulty]);
+
   const sessionStats = useMemo(() => {
     if (!currentSession) {
       return null;
@@ -828,36 +907,46 @@ const TutorPage = () => {
       return;
     }
 
+    if (!currentSession.createdAt) {
+      return;
+    }
+
     // Calculate duration in seconds based on current timestamp
     // Use current time for duration calculation, not lastUpdated to avoid loops
     let durationSec: number | undefined;
-    if (currentSession.createdAt) {
-      const now = Date.now();
-      const durationMs = Math.max(0, now - currentSession.createdAt.getTime());
-      if (durationMs > 0) {
-        durationSec = Math.floor(durationMs / 1000);
-      }
+    const now = Date.now();
+    const durationMs = Math.max(0, now - currentSession.createdAt.getTime());
+    if (durationMs > 0) {
+      durationSec = Math.floor(durationMs / 1000);
     }
 
     // Update stats if they've changed
-    const currentStats = currentSession.stats;
-    const newStats = {
-      totalTurns: sessionStats.userTurns,
-      hintsUsed: sessionStats.hintCount,
-      durationSec,
-    };
+    const currentStats = currentSession.stats ?? null;
+    const turnsChanged = (currentStats?.totalTurns ?? 0) !== sessionStats.userTurns;
+    const hintsChanged = (currentStats?.hintsUsed ?? 0) !== sessionStats.hintCount;
+    const durationChanged =
+      durationSec !== undefined ? currentStats?.durationSec !== durationSec : false;
 
-    const statsChanged =
-      !currentStats ||
-      currentStats.totalTurns !== newStats.totalTurns ||
-      currentStats.hintsUsed !== newStats.hintsUsed ||
-      (newStats.durationSec !== undefined && currentStats.durationSec !== newStats.durationSec);
+    const statsChanged = turnsChanged || hintsChanged || durationChanged;
 
     // Only update if stats have changed
     if (statsChanged) {
+      const statsForWrite: {
+        totalTurns: number;
+        hintsUsed: number;
+        durationSec?: number;
+      } = {
+        totalTurns: sessionStats.userTurns,
+        hintsUsed: sessionStats.hintCount,
+      };
+
+      if (durationSec !== undefined) {
+        statsForWrite.durationSec = durationSec;
+      }
+
       const sessionRef = doc(firestore, 'users', user.uid, 'sessions', activeSessionId);
       updateDoc(sessionRef, {
-        stats: newStats,
+        stats: statsForWrite,
         lastUpdated: serverTimestamp(),
       }).catch((error) => {
         console.error('Failed to update session stats', error);
@@ -911,12 +1000,9 @@ const TutorPage = () => {
     imageUrl,
     mode = 'default',
     skipEvaluation,
-  }: {
-    content: string;
-    imageUrl?: string | null;
-    mode?: GenerateResponseMode;
-    skipEvaluation?: boolean;
-  }) => {
+    topicId,
+    difficulty,
+  }: SendMessageOptions) => {
     if (!user || !activeSessionId || isSending) {
       return;
     }
@@ -942,7 +1028,8 @@ const TutorPage = () => {
         role: 'user',
         content: trimmed || '',
         imageUrl: imageUrl ?? null,
-        topicId: null,
+        topicId: topicId ?? null,
+        difficulty: difficulty ?? null,
         stepType: null,
         createdAt: serverTimestamp(),
       });
@@ -1044,6 +1131,7 @@ const TutorPage = () => {
                   content: streamingContent,
                   imageUrl: null,
                   topicId: null,
+                  difficulty: null,
                   createdAt: new Date(),
                   stepType: streamingStepType,
                   pending: true,
@@ -1157,6 +1245,127 @@ const TutorPage = () => {
       console.error('Failed to process tutor message flow', error);
     } finally {
       setIsSending(false);
+    }
+  };
+
+  sendMessageRef.current = sendMessage;
+
+  useEffect(() => {
+    if (!pendingGeneratedProblem) {
+      return;
+    }
+
+    if (pendingGeneratedProblem.sessionId !== activeSessionId) {
+      return;
+    }
+
+    if (!user) {
+      setPendingGeneratedProblem(null);
+      return;
+    }
+
+    if (isSending) {
+      return;
+    }
+
+    const currentMessages = sessionStoreApi.getState().messages;
+    if (currentMessages.length > 0) {
+      setPendingGeneratedProblem(null);
+      return;
+    }
+
+    const { problem } = pendingGeneratedProblem;
+    const sendMessageFn = sendMessageRef.current;
+
+    if (!sendMessageFn) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        await sendMessageFn({
+          content: problem.problemText,
+          mode: 'default',
+          skipEvaluation: true,
+          topicId: problem.topicId ?? null,
+          difficulty: problem.difficulty ?? null,
+        });
+      } catch (error) {
+        console.error('Failed to seed generated problem message', error);
+      } finally {
+        setPendingGeneratedProblem(null);
+      }
+    })();
+  }, [pendingGeneratedProblem, activeSessionId, user, isSending, sendMessageRef, sessionStoreApi]);
+
+  const handleProblemModalClose = () => {
+    if (isGeneratingProblem) {
+      return;
+    }
+    setProblemModalOpen(false);
+  };
+
+  const handleOpenProblemModal = () => {
+    setProblemGeneratorError(null);
+    setSelectedProblemTopic(activeTopicId ?? '');
+    const defaultDifficulty: ProblemDifficulty = isSupportedDifficulty(currentSession?.difficulty)
+      ? (currentSession?.difficulty as ProblemDifficulty)
+      : 'intermediate';
+    setSelectedProblemDifficulty(defaultDifficulty);
+    setProblemModalOpen(true);
+  };
+
+  const handleProblemGenerationSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!user) {
+      setProblemGeneratorError('Please sign in before generating a problem.');
+      return;
+    }
+
+    if (isGeneratingProblem) {
+      return;
+    }
+
+    setIsGeneratingProblem(true);
+    setProblemGeneratorError(null);
+
+    try {
+      const params = {
+        topicId: selectedProblemTopic || undefined,
+        difficulty: selectedProblemDifficulty,
+      };
+
+      const generated = await generateProblem(params);
+
+      const sessionsCollection = collection(firestore, 'users', user.uid, 'sessions');
+      const newSessionRef = doc(sessionsCollection);
+
+      await setDoc(newSessionRef, {
+        createdAt: serverTimestamp(),
+        lastUpdated: serverTimestamp(),
+        topicId: generated.topicId ?? null,
+        difficulty: generated.difficulty ?? null,
+        title: buildGeneratedSessionTitle(generated),
+      });
+
+      clearMessages();
+      setEvaluations({});
+      setInputValue('');
+      setPendingImageUrl(null);
+      setPendingImageFile(null);
+      setOcrError(null);
+
+      setActiveSessionId(newSessionRef.id);
+      setPendingGeneratedProblem({ sessionId: newSessionRef.id, problem: generated });
+      setSelectedProblemTopic(generated.topicId ?? '');
+      setSelectedProblemDifficulty(generated.difficulty);
+      setProblemModalOpen(false);
+    } catch (error) {
+      console.error('Failed to generate AI problem', error);
+      setProblemGeneratorError('We could not generate a problem right now. Please try again.');
+    } finally {
+      setIsGeneratingProblem(false);
     }
   };
 
@@ -1315,7 +1524,7 @@ const TutorPage = () => {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-4 px-4 pt-4 md:px-6 min-h-0 overflow-hidden">
+    <div className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col gap-4 overflow-hidden px-4 pt-4 md:px-6">
       <div className="flex shrink-0 items-center justify-between gap-3 pb-4">
         <div>
           <h1 className="text-2xl font-semibold text-brand-charcoal">Tutor</h1>
@@ -1323,6 +1532,16 @@ const TutorPage = () => {
             Guided Socratic dialogue to help you learn math step by step.
           </p>
         </div>
+        <button
+          type="button"
+          onClick={handleOpenProblemModal}
+          disabled={isSending || isUploading || isGeneratingProblem}
+          className="flex items-center gap-2 rounded-full border border-brand-sky px-4 py-2 text-sm font-medium text-brand-charcoal transition hover:bg-brand-sky/10 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <span aria-hidden>✨</span>
+          <span className="hidden sm:inline">New AI Problem</span>
+          <span className="sm:hidden">AI Problem</span>
+        </button>
       </div>
 
       {sessionError ? (
@@ -1335,14 +1554,26 @@ const TutorPage = () => {
         <section className="flex min-h-0 flex-1 flex-col rounded-2xl border border-brand-mint/60 bg-white shadow-subtle">
           <header className="flex items-center justify-between border-b border-brand-mint/60 px-4 py-3">
             <h2 className="text-lg font-semibold text-brand-charcoal">Chat</h2>
-            <span className="rounded-full bg-brand-mint/40 px-3 py-1 text-xs font-medium text-brand-slate">
-              Socratic mode
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-brand-mint/40 px-3 py-1 text-xs font-medium text-brand-slate">
+                Socratic mode
+              </span>
+              {activeTopicLabel ? (
+                <span className="rounded-full border border-brand-mint/60 px-3 py-1 text-xs font-medium text-brand-slate">
+                  Topic: {activeTopicLabel}
+                </span>
+              ) : null}
+              {activeDifficultyLabel ? (
+                <span className="rounded-full border border-brand-mint/60 px-3 py-1 text-xs font-medium text-brand-slate">
+                  Difficulty: {activeDifficultyLabel}
+                </span>
+              ) : null}
+            </div>
           </header>
           <div className="flex min-h-0 flex-1 flex-col">
             <div
               ref={messagesContainerRef}
-              className="flex-1 space-y-4 overflow-y-auto px-4 py-6 min-h-0"
+              className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-6"
             >
               {formattedMessages.length === 0 ? (
                 <div className="rounded-xl bg-brand-sky/10 p-4 text-sm text-brand-slate">
@@ -1372,11 +1603,11 @@ const TutorPage = () => {
                         </span>
                       ) : null}
                       {message.imageUrl ? (
-                        <div className="mb-3 rounded-xl overflow-hidden border border-brand-mint/60 bg-white">
+                        <div className="mb-3 overflow-hidden rounded-xl border border-brand-mint/60 bg-white">
                           <img
                             src={message.imageUrl}
                             alt="Math problem"
-                            className="w-full h-auto max-h-96 object-contain"
+                            className="h-auto max-h-96 w-full object-contain"
                             loading="lazy"
                             onLoad={() => {
                               // Scroll to bottom when image loads to account for height change
@@ -1468,7 +1699,7 @@ const TutorPage = () => {
                     <img
                       src={pendingImageUrl}
                       alt="Math problem preview"
-                      className="h-20 w-20 rounded-lg object-cover border border-brand-mint/60"
+                      className="size-20 rounded-lg border border-brand-mint/60 object-cover"
                     />
                     <div className="flex-1">
                       <p className="text-xs font-medium text-brand-charcoal">Image ready to send</p>
@@ -1503,6 +1734,111 @@ const TutorPage = () => {
           </footer>
         </section>
       </div>
+
+      {isProblemModalOpen ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
+          <form
+            className="w-full max-w-lg space-y-5 rounded-2xl border border-brand-mint/60 bg-white p-6 shadow-subtle"
+            onSubmit={handleProblemGenerationSubmit}
+          >
+            <div>
+              <h3 className="text-lg font-semibold text-brand-charcoal">Generate a New Problem</h3>
+              <p className="mt-2 text-sm text-brand-slate">
+                MathMate will craft a fresh prompt tailored to your selected focus area and
+                difficulty.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium text-brand-charcoal" htmlFor="problem-topic">
+                Topic focus
+              </label>
+              <select
+                id="problem-topic"
+                value={selectedProblemTopic}
+                onChange={(event) => setSelectedProblemTopic(event.target.value)}
+                disabled={isGeneratingProblem}
+                className="mt-2 w-full rounded-xl border border-brand-mint/60 bg-white px-3 py-2 text-sm text-brand-charcoal outline-none transition focus:border-brand-sky"
+              >
+                <option value="">Let MathMate choose</option>
+                {PROBLEM_TOPICS.map((topic) => (
+                  <option key={topic.id} value={topic.id}>
+                    {topic.label}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-xs text-brand-slate">
+                {selectedTopicDetails
+                  ? selectedTopicDetails.description
+                  : 'Leave this blank to let MathMate surprise you with a relevant concept.'}
+              </p>
+            </div>
+
+            <fieldset>
+              <legend className="text-sm font-medium text-brand-charcoal">Difficulty</legend>
+              <div className="mt-3 grid gap-2">
+                {DIFFICULTY_OPTIONS.map((option) => {
+                  const isActive = selectedProblemDifficulty === option.value;
+                  const inputId = `problem-difficulty-${option.value}`;
+                  return (
+                    <label
+                      key={option.value}
+                      htmlFor={inputId}
+                      aria-label={option.label}
+                      className={`flex cursor-pointer items-start gap-3 border ${
+                        isActive
+                          ? 'border-brand-sky bg-brand-sky/10'
+                          : 'border-brand-mint/60 hover:border-brand-sky/60'
+                      } rounded-xl px-3 py-2 text-sm transition`}
+                    >
+                      <input
+                        id={inputId}
+                        type="radio"
+                        name="problem-difficulty"
+                        value={option.value}
+                        checked={isActive}
+                        onChange={() => setSelectedProblemDifficulty(option.value)}
+                        disabled={isGeneratingProblem}
+                        className="mt-1 size-4 text-brand-sky focus:ring-brand-sky"
+                      />
+                      <div>
+                        <span className="block font-medium text-brand-charcoal">
+                          {option.label}
+                        </span>
+                        <span className="block text-xs text-brand-slate">{option.description}</span>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
+
+            {problemGeneratorError ? (
+              <div className="rounded-xl border border-brand-coral/50 bg-[#FEE2E2] px-3 py-2 text-sm text-brand-charcoal">
+                {problemGeneratorError}
+              </div>
+            ) : null}
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={handleProblemModalClose}
+                disabled={isGeneratingProblem}
+                className="flex-1 rounded-full border border-brand-slate px-4 py-2 text-sm font-medium text-brand-slate transition hover:bg-brand-background disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isGeneratingProblem}
+                className="flex-1 rounded-full bg-brand-sky px-4 py-2 text-sm font-medium text-white shadow-subtle transition hover:bg-brand-sky/90 disabled:cursor-not-allowed disabled:bg-brand-slate"
+              >
+                {isGeneratingProblem ? 'Generating…' : 'Generate Problem'}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </div>
   );
 };

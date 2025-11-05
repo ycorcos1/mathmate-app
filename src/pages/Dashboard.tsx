@@ -84,7 +84,7 @@ const DashboardContent = () => {
         unlocked: streaks.current >= 7,
       },
     ],
-    [stats.totalSessions, streaks.current],
+    [stats.totalSessions, streaks],
   );
 
   // Get recent sessions (last 5)
@@ -472,7 +472,6 @@ const DashboardContent = () => {
                             }}
                             onClick={(e) => e.stopPropagation()}
                             onKeyUp={(e) => e.stopPropagation()}
-                            autoFocus
                             className="flex-1 rounded border border-brand-sky px-2 py-1 text-sm font-semibold text-brand-charcoal focus:outline-none focus:ring-2 focus:ring-brand-sky"
                           />
                         ) : (

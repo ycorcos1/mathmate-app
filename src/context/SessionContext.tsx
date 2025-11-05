@@ -10,6 +10,7 @@ export interface SessionMessage {
   content: string;
   imageUrl?: string | null;
   topicId: string | null;
+  difficulty?: string | null;
   createdAt: Date | null;
   stepType: 'hint' | 'check' | 'final' | null;
   pending?: boolean;

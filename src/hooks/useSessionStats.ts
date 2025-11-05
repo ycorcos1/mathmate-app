@@ -86,6 +86,7 @@ export const useSessionStats = () => {
             topicId?: unknown;
             stats?: unknown;
             completed?: boolean;
+            difficulty?: unknown;
           };
 
           let normalizedStats: SessionSummary['stats'] = null;
@@ -104,6 +105,8 @@ export const useSessionStats = () => {
           const rawTitle = typeof data.title === 'string' ? data.title.trim() : '';
           const rawTopic = typeof data.topicId === 'string' ? data.topicId.trim() : '';
           const completed = typeof data.completed === 'boolean' ? data.completed : false;
+          const rawDifficulty =
+            typeof data.difficulty === 'string' ? data.difficulty.trim().toLowerCase() : '';
 
           return {
             id: docSnapshot.id,
@@ -111,6 +114,7 @@ export const useSessionStats = () => {
             lastUpdated: data.lastUpdated instanceof Timestamp ? data.lastUpdated.toDate() : null,
             title: rawTitle || null,
             topicId: rawTopic || null,
+            difficulty: rawDifficulty || null,
             stats: normalizedStats,
             completed,
           } satisfies SessionSummary;

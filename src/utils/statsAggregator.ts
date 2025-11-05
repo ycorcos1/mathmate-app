@@ -8,6 +8,7 @@ export interface SessionSummary {
   lastUpdated: Date | null;
   title: string | null;
   topicId: string | null;
+  difficulty?: string | null;
   stats: {
     totalTurns?: number;
     hintsUsed?: number;

@@ -122,8 +122,10 @@ export const callGenerateResponseStream = async (
   let finalResult: GenerateResponseResult | null = null;
 
   try {
-    while (true) {
+    let doneReading = false;
+    while (!doneReading) {
       const { done, value } = await reader.read();
+      doneReading = done;
 
       if (done) {
         break;

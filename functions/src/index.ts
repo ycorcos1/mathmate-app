@@ -22,6 +22,92 @@ const corsHandler = cors(corsOptions);
 
 type StepType = 'hint' | 'check' | 'final';
 type ResponseMode = 'default' | 'hint';
+type ProblemDifficulty = 'beginner' | 'intermediate' | 'advanced';
+
+const DEFAULT_PROBLEM_DIFFICULTY: ProblemDifficulty = 'intermediate';
+
+const PROBLEM_DIFFICULTY_GUIDANCE: Record<ProblemDifficulty, string> = {
+  beginner:
+    'Design an accessible problem with concrete numbers, explicit structure, and a clear question suitable for students building foundational skills.',
+  intermediate:
+    'Create a multi-step problem that blends conceptual reasoning and computation, appropriate for typical Algebra I/II or Geometry learners.',
+  advanced:
+    'Craft a challenging problem that requires synthesizing multiple ideas or deeper abstraction, fitting for precalculus, calculus, or contest-style thinking.',
+};
+
+const PROBLEM_TOPIC_GUIDANCE: Record<string, { label: string; guidance: string }> = {
+  'arithmetic-fractions': {
+    label: 'Fractions & Ratios',
+    guidance:
+      'Focus on comparing, adding, subtracting, or reasoning with fractions and ratios. Embed the situation in a real-world or story context when possible.',
+  },
+  'algebra-linear-equations': {
+    label: 'Linear Equations',
+    guidance:
+      'Center the problem on solving single-variable linear equations or systems with clear reasoning steps and opportunities to check work.',
+  },
+  'algebra-quadratics': {
+    label: 'Quadratic Expressions',
+    guidance:
+      'Highlight factoring, expanding, or solving quadratic equations. Encourage analyzing the structure of the quadratic before proceeding.',
+  },
+  'geometry-triangles': {
+    label: 'Triangles & Angles',
+    guidance:
+      'Use triangle properties, similarity, or the Pythagorean theorem. Invite the learner to diagram or reference geometric relationships.',
+  },
+  'geometry-circles': {
+    label: 'Circles & Arcs',
+    guidance:
+      'Work with central angles, arc length, area, or chord properties inside circles. Provide enough detail for geometric reasoning without giving the answer.',
+  },
+  'calculus-derivatives': {
+    label: 'Intro Calculus',
+    guidance:
+      'Ask for interpretation or computation of derivatives, emphasizing rate-of-change intuition within a contextual scenario.',
+  },
+};
+
+const DEFAULT_TOPIC_GUIDANCE =
+  'Select a meaningful concept from algebra, geometry, or calculus and pose a problem that invites step-by-step reasoning without revealing the answer.';
+
+const PROBLEM_GENERATOR_PROMPT = `You are MathMate, an AI tutor content designer. Generate a single math problem aligned with the requested topic and difficulty. The problem must invite reasoning and avoid giving away the solution.
+
+Always respond with a single JSON object using this exact shape:
+{
+  "problemText": "<full problem statement with LaTeX where helpful>",
+  "topicId": "<kebab-case topic identifier>",
+  "difficulty": "beginner" | "intermediate" | "advanced",
+  "suggestedHint": "<optional nudge that unlocks the first step>",
+  "title": "<short descriptive title for dashboards>"
+}
+
+Rules:
+1. NEVER include the final answer or full worked solution.
+2. Encourage the learner to think or explain their steps.
+3. Use LaTeX delimiters ($...$ or $$...$$) for mathematical expressions when appropriate.
+4. Omit suggestedHint if it is not necessary.
+`;
+
+const isValidProblemDifficulty = (value: unknown): value is ProblemDifficulty =>
+  typeof value === 'string' && ['beginner', 'intermediate', 'advanced'].includes(value);
+
+const normalizeTopicId = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const sanitizeTopicId = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'general';
 
 const BASE_SYSTEM_PROMPT = `You are MathMate, a Socratic math tutor. Your role is to GUIDE learners to discover solutions themselves, NEVER to solve problems for them.
 
@@ -338,6 +424,136 @@ export const generateResponse = functions
         res.status(500).json({
           error: 'Failed to initialize OpenAI client. Check logs for details.',
         });
+      }
+    });
+  });
+
+export const generateProblem = functions
+  .region('us-central1')
+  .runWith({
+    timeoutSeconds: 120,
+    memory: '512MB',
+    secrets: ['OPENAI_API_KEY'],
+  })
+  .https.onRequest((req, res) => {
+    corsHandler(req, res, async () => {
+      if (req.method === 'OPTIONS') {
+        res.status(204).send('');
+        return;
+      }
+
+      if (req.method !== 'POST') {
+        res.status(405).json({ error: 'Method not allowed' });
+        return;
+      }
+
+      const { topic, difficulty } = req.body as {
+        topic?: unknown;
+        difficulty?: unknown;
+      };
+
+      const requestedTopic = normalizeTopicId(topic);
+      const requestedDifficulty: ProblemDifficulty = isValidProblemDifficulty(difficulty)
+        ? (difficulty as ProblemDifficulty)
+        : DEFAULT_PROBLEM_DIFFICULTY;
+
+      const topicGuidance = requestedTopic ? PROBLEM_TOPIC_GUIDANCE[requestedTopic] : undefined;
+      const topicGuidanceText = topicGuidance?.guidance ?? DEFAULT_TOPIC_GUIDANCE;
+
+      const systemContent = `${PROBLEM_GENERATOR_PROMPT}
+
+Difficulty focus: ${PROBLEM_DIFFICULTY_GUIDANCE[requestedDifficulty]}
+Topic focus: ${topicGuidanceText}
+Return the JSON exactly as specified.`;
+
+      const userContent = topicGuidance
+        ? `Generate one ${requestedDifficulty} problem about ${topicGuidance.label}. If you select a different but related topic, set topicId to a descriptive kebab-case label.`
+        : `Generate one ${requestedDifficulty} math problem. Choose an appropriate topic and set topicId to a descriptive kebab-case label.`;
+
+      try {
+        const client = getOpenAIClient();
+        const completion = await client.chat.completions.create({
+          model: 'gpt-4o-mini',
+          temperature: 0.7,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: systemContent },
+            { role: 'user', content: userContent },
+          ],
+        });
+
+        const rawContent = completion.choices[0]?.message?.content?.trim();
+
+        if (!rawContent) {
+          res.status(500).json({ error: 'No response returned from OpenAI.' });
+          return;
+        }
+
+        let parsed: unknown;
+
+        try {
+          parsed = JSON.parse(rawContent);
+        } catch (parseError) {
+          console.error('Failed to parse generated problem JSON', parseError, rawContent);
+          res.status(500).json({ error: 'Malformed problem response returned from OpenAI.' });
+          return;
+        }
+
+        const problemText =
+          parsed &&
+          typeof parsed === 'object' &&
+          typeof (parsed as { problemText?: unknown }).problemText === 'string'
+            ? ((parsed as { problemText: string }).problemText || '').trim()
+            : '';
+
+        if (!problemText) {
+          res.status(500).json({ error: 'OpenAI returned an empty problem statement.' });
+          return;
+        }
+
+        const rawTopicId =
+          parsed &&
+          typeof parsed === 'object' &&
+          typeof (parsed as { topicId?: unknown }).topicId === 'string'
+            ? ((parsed as { topicId: string }).topicId || '').trim()
+            : (requestedTopic ?? 'general');
+        const resolvedTopicId = sanitizeTopicId(rawTopicId);
+
+        const rawDifficulty =
+          parsed &&
+          typeof parsed === 'object' &&
+          typeof (parsed as { difficulty?: unknown }).difficulty === 'string'
+            ? ((parsed as { difficulty: string }).difficulty || '').trim().toLowerCase()
+            : '';
+
+        const resolvedDifficulty: ProblemDifficulty = isValidProblemDifficulty(rawDifficulty)
+          ? (rawDifficulty as ProblemDifficulty)
+          : requestedDifficulty;
+
+        const suggestedHint =
+          parsed &&
+          typeof parsed === 'object' &&
+          typeof (parsed as { suggestedHint?: unknown }).suggestedHint === 'string'
+            ? ((parsed as { suggestedHint: string }).suggestedHint || '').trim()
+            : '';
+
+        const title =
+          parsed &&
+          typeof parsed === 'object' &&
+          typeof (parsed as { title?: unknown }).title === 'string'
+            ? ((parsed as { title: string }).title || '').trim()
+            : '';
+
+        res.status(200).json({
+          problemText,
+          topicId: resolvedTopicId,
+          difficulty: resolvedDifficulty,
+          suggestedHint: suggestedHint || undefined,
+          title: title || undefined,
+        });
+      } catch (error) {
+        console.error('generateProblem failed', error);
+        res.status(500).json({ error: 'Failed to generate problem.' });
       }
     });
   });
