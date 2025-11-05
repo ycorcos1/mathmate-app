@@ -41,6 +41,7 @@ export const callGenerateProblem = async (
     body: JSON.stringify({
       topic: params.topicId ?? null,
       difficulty: params.difficulty ?? null,
+      recentProblems: params.recentProblems ?? null,
     }),
   });
 

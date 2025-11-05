@@ -3,6 +3,7 @@ export type ProblemDifficulty = 'beginner' | 'intermediate' | 'advanced';
 export interface ProblemGenerationParams {
   topicId?: string;
   difficulty?: ProblemDifficulty;
+  recentProblems?: Array<{ topicId: string; problemText: string; timestamp: number }>;
 }
 
 export interface GeneratedProblem {
@@ -19,4 +20,3 @@ export interface ProblemTopic {
   description: string;
   samplePrompt: string;
 }
-

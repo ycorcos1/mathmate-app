@@ -296,7 +296,7 @@ const DashboardContent = () => {
           )}
         </div>
         <div className="rounded-2xl border border-brand-mint/60 bg-white p-6 shadow-subtle">
-          <p className="text-sm text-brand-slate">Avg Solve Time</p>
+          <p className="text-sm text-brand-slate">Average Session Time</p>
           {statsLoading ? (
             <p className="mt-2 text-3xl font-semibold text-brand-charcoal">—</p>
           ) : (

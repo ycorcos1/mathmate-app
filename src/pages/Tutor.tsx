@@ -2,6 +2,9 @@ import {
   addDoc,
   collection,
   doc,
+  type DocumentReference,
+  getDoc,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -22,6 +25,7 @@ import {
 import { LoadingScreen } from '../components/LoadingScreen';
 import { MathText } from '../components/MathText';
 import { useAuth } from '../context/AuthContext';
+import { useUserDoc } from '../hooks/useUserDoc';
 import {
   useSessionStore,
   useSessionStoreApi,
@@ -55,7 +59,7 @@ type SessionSummary = {
 
 type PendingGeneratedProblemState = {
   sessionId: string;
-  problem: GeneratedProblem;
+  problem: GeneratedProblem & { topicId: string };
 };
 
 type SendMessageOptions = {
@@ -81,6 +85,66 @@ const buildGeneratedSessionTitle = (problem: GeneratedProblem): string => {
   }
 
   return 'AI Practice Session';
+};
+
+// Helper function to generate session title from first user message (async, non-blocking)
+const generateSessionTitle = async (
+  firstMessage: string,
+  userId: string,
+  sessionId: string,
+): Promise<void> => {
+  try {
+    // Use OpenAI to generate a short, descriptive title from the first message
+    const titlePrompt = `Based on this math question or problem, generate a short, descriptive session title (max 50 characters). Just return the title, nothing else.
+
+Question: "${firstMessage.substring(0, 200)}"
+
+Title:`;
+
+    // Call OpenAI API directly (we'll use the generateResponse endpoint with a special mode)
+    const baseUrl =
+      import.meta.env.VITE_FUNCTIONS_BASE_URL?.replace(/\/$/, '') ||
+      `https://us-central1-${import.meta.env.VITE_FIREBASE_PROJECT_ID}.cloudfunctions.net`;
+
+    const response = await fetch(`${baseUrl}/generateResponse`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a helpful assistant that generates concise, descriptive titles for math tutoring sessions. Return only the title, no additional text.',
+          },
+          {
+            role: 'user',
+            content: titlePrompt,
+          },
+        ],
+        mode: 'default',
+        stream: false,
+      }),
+    });
+
+    if (response.ok) {
+      const data = (await response.json()) as { content?: string };
+      const generatedTitle = data.content?.trim();
+
+      if (generatedTitle && generatedTitle.length > 0 && generatedTitle.length <= 100) {
+        // Update session document with generated title
+        const sessionRef = doc(firestore, 'users', userId, 'sessions', sessionId);
+        await updateDoc(sessionRef, {
+          title: generatedTitle,
+          lastUpdated: serverTimestamp(),
+        });
+      }
+    }
+  } catch (error) {
+    // Silently fail - title generation is non-critical
+    console.error('Failed to generate session title', error);
+  }
 };
 
 type FormattedMessage = SessionMessage & {
@@ -297,6 +361,7 @@ const getDraftStorageKey = (sessionId: string | null) => {
 
 const TutorPage = () => {
   const { user } = useAuth();
+  const { userDoc } = useUserDoc();
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -744,8 +809,12 @@ const TutorPage = () => {
     }
 
     if (previousSessionIdRef.current && previousSessionIdRef.current !== activeSessionId) {
+      // Clear messages and pending state when switching sessions
       clearMessages();
       setEvaluations({});
+      // Clear pending message refs to prevent messages from old session appearing
+      pendingMessageIdRef.current = null;
+      isStreamingRef.current = false;
     }
 
     previousSessionIdRef.current = activeSessionId;
@@ -1024,6 +1093,11 @@ const TutorPage = () => {
     const evaluationsCollection = collection(sessionRef, 'evaluations');
 
     try {
+      // Check if this is the first user message in the session (for title generation)
+      const isFirstUserMessage = existingMessages.length === 0;
+      const sessionDoc = await getDoc(sessionRef);
+      const sessionHasTitle = sessionDoc.exists() && sessionDoc.data()?.title;
+
       const userMessageRef = await addDoc(messagesCollection, {
         role: 'user',
         content: trimmed || '',
@@ -1037,6 +1111,12 @@ const TutorPage = () => {
       await updateDoc(sessionRef, {
         lastUpdated: serverTimestamp(),
       });
+
+      // Generate session title asynchronously if this is the first message and no title exists
+      if (isFirstUserMessage && !sessionHasTitle && trimmed) {
+        // Don't await - let it run in background
+        void generateSessionTitle(trimmed, user.uid, activeSessionId);
+      }
 
       if (!shouldSkipEvaluation && trimmed) {
         const lastAssistantMessage = [...existingMessages]
@@ -1073,16 +1153,6 @@ const TutorPage = () => {
       // Context retention: Log context size for monitoring
       // Future enhancement: Summarize older messages if conversation exceeds ~20 messages
       const contextSize = payload.length;
-      if (contextSize > 20) {
-        console.log(
-          `Long conversation context: ${contextSize} messages. Consider summarization for very long threads.`,
-        );
-      }
-
-      // Debug: Log if image is being sent
-      if (imageUrl) {
-        console.log('Sending message with image:', { imageUrl, content: trimmed });
-      }
 
       // Use streaming for better UX
       let streamingContent = '';
@@ -1268,35 +1338,60 @@ const TutorPage = () => {
       return;
     }
 
-    const currentMessages = sessionStoreApi.getState().messages;
-    if (currentMessages.length > 0) {
-      setPendingGeneratedProblem(null);
-      return;
-    }
-
     const { problem } = pendingGeneratedProblem;
-    const sendMessageFn = sendMessageRef.current;
-
-    if (!sendMessageFn) {
-      return;
-    }
 
     void (async () => {
       try {
-        await sendMessageFn({
+        if (!activeSessionId) {
+          return;
+        }
+
+        const sessionRef = doc(firestore, 'users', user.uid, 'sessions', activeSessionId);
+        const messagesCollection = collection(sessionRef, 'messages');
+
+        // Check if this is the first message in the session (for title generation)
+        // Query messages before adding the new one to check if collection is empty
+        const existingMessagesQuery = query(messagesCollection, orderBy('createdAt', 'asc'));
+        const existingMessagesSnapshot = await getDocs(existingMessagesQuery);
+        const isFirstMessage = existingMessagesSnapshot.empty;
+
+        // Get session data to check title
+        const sessionDoc = await getDoc(sessionRef);
+        const sessionData = sessionDoc.exists() ? sessionDoc.data() : null;
+        const sessionTitle = sessionData?.title || '';
+        // Check if title is still the static default (from buildGeneratedSessionTitle)
+        const hasStaticTitle =
+          sessionTitle.includes('AI Practice') ||
+          sessionTitle === 'AI Practice Session' ||
+          !sessionTitle.trim();
+
+        // Directly create an assistant message with the problem text (append to existing session)
+        await addDoc(messagesCollection, {
+          role: 'assistant',
           content: problem.problemText,
-          mode: 'default',
-          skipEvaluation: true,
+          imageUrl: null,
           topicId: problem.topicId ?? null,
           difficulty: problem.difficulty ?? null,
+          stepType: null,
+          createdAt: serverTimestamp(),
         });
+
+        await updateDoc(sessionRef, {
+          lastUpdated: serverTimestamp(),
+        });
+
+        // Generate session title from problem text if this is the first message and title is still static
+        if (isFirstMessage && hasStaticTitle && problem.problemText) {
+          // Don't await - let it run in background
+          void generateSessionTitle(problem.problemText, user.uid, activeSessionId);
+        }
       } catch (error) {
         console.error('Failed to seed generated problem message', error);
       } finally {
         setPendingGeneratedProblem(null);
       }
     })();
-  }, [pendingGeneratedProblem, activeSessionId, user, isSending, sendMessageRef, sessionStoreApi]);
+  }, [pendingGeneratedProblem, activeSessionId, user, isSending, sessionStoreApi]);
 
   const handleProblemModalClose = () => {
     if (isGeneratingProblem) {
@@ -1331,33 +1426,84 @@ const TutorPage = () => {
     setProblemGeneratorError(null);
 
     try {
+      // Get recent problems from user document for diversity tracking
+      const recentProblemsData =
+        (
+          userDoc as {
+            recentProblems?: Array<{ topicId: string; problemText: string; timestamp: number }>;
+          }
+        )?.recentProblems ?? [];
+
+      // Keep only last 10 problems to avoid too much data
+      const recentProblems = recentProblemsData.slice(-10);
+
       const params = {
         topicId: selectedProblemTopic || undefined,
         difficulty: selectedProblemDifficulty,
+        recentProblems,
       };
 
       const generated = await generateProblem(params);
 
-      const sessionsCollection = collection(firestore, 'users', user.uid, 'sessions');
-      const newSessionRef = doc(sessionsCollection);
+      // Use current session if it exists, otherwise create a new one
+      let sessionIdToUse: string;
+      let sessionRef: DocumentReference;
 
-      await setDoc(newSessionRef, {
-        createdAt: serverTimestamp(),
-        lastUpdated: serverTimestamp(),
-        topicId: generated.topicId ?? null,
-        difficulty: generated.difficulty ?? null,
-        title: buildGeneratedSessionTitle(generated),
+      if (activeSessionId) {
+        // Use existing session
+        sessionIdToUse = activeSessionId;
+        sessionRef = doc(firestore, 'users', user.uid, 'sessions', activeSessionId);
+        // Update session metadata if needed
+        await updateDoc(sessionRef, {
+          topicId: generated.topicId ?? null,
+          difficulty: generated.difficulty ?? null,
+          lastUpdated: serverTimestamp(),
+        });
+      } else {
+        // Create new session if none exists
+        const sessionsCollection = collection(firestore, 'users', user.uid, 'sessions');
+        const newSessionRef = doc(sessionsCollection);
+
+        await setDoc(newSessionRef, {
+          createdAt: serverTimestamp(),
+          lastUpdated: serverTimestamp(),
+          topicId: generated.topicId ?? null,
+          difficulty: generated.difficulty ?? null,
+          title: buildGeneratedSessionTitle(generated),
+        });
+
+        sessionIdToUse = newSessionRef.id;
+        sessionRef = newSessionRef;
+        setActiveSessionId(sessionIdToUse);
+      }
+
+      // Update problem history in user document
+      const userRef = doc(firestore, 'users', user.uid);
+      const newProblemEntry: { topicId: string; problemText: string; timestamp: number } = {
+        topicId: generated.topicId || 'general',
+        problemText: generated.problemText,
+        timestamp: Date.now(),
+      };
+
+      // Add new problem and keep only last 10
+      const updatedProblems: Array<{ topicId: string; problemText: string; timestamp: number }> = [
+        ...recentProblems,
+        newProblemEntry,
+      ].slice(-10);
+
+      await updateDoc(userRef, {
+        recentProblems: updatedProblems,
       });
 
-      clearMessages();
-      setEvaluations({});
-      setInputValue('');
-      setPendingImageUrl(null);
-      setPendingImageFile(null);
-      setOcrError(null);
-
-      setActiveSessionId(newSessionRef.id);
-      setPendingGeneratedProblem({ sessionId: newSessionRef.id, problem: generated });
+      // Append problem to the session
+      const problemWithTopicId: GeneratedProblem & { topicId: string } = {
+        ...generated,
+        topicId: generated.topicId || 'general',
+      };
+      setPendingGeneratedProblem({
+        sessionId: sessionIdToUse,
+        problem: problemWithTopicId,
+      });
       setSelectedProblemTopic(generated.topicId ?? '');
       setSelectedProblemDifficulty(generated.difficulty);
       setProblemModalOpen(false);

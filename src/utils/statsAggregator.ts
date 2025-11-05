@@ -39,15 +39,29 @@ export interface ChartDataPoint {
  * @returns Aggregated statistics
  */
 export const aggregateStats = (sessions: SessionSummary[]): AggregatedStats => {
-  const completedSessions = sessions.filter((session) => session.completed === true);
+  // Include completed sessions AND sessions with meaningful stats (hints used or duration)
+  // This ensures active sessions with progress are counted in the dashboard
+  const sessionsToCount = sessions.filter((session) => {
+    // Always count completed sessions
+    if (session.completed === true) {
+      return true;
+    }
+    // Also count sessions that have meaningful stats (active sessions with progress)
+    if (session.stats) {
+      const hasHints = (session.stats.hintsUsed ?? 0) > 0;
+      const hasDuration = (session.stats.durationSec ?? 0) > 0;
+      return hasHints || hasDuration;
+    }
+    return false;
+  });
 
-  const totalSessions = completedSessions.length;
+  const totalSessions = sessionsToCount.length;
 
   let totalHintsUsed = 0;
   let totalDurationSec = 0;
   let durationCount = 0;
 
-  completedSessions.forEach((session) => {
+  sessionsToCount.forEach((session) => {
     if (session.stats) {
       const hintsUsed = session.stats.hintsUsed ?? 0;
       const durationSec = session.stats.durationSec;
@@ -172,9 +186,21 @@ export const generateChartData = (
   sessions: SessionSummary[],
   weeks: number = 4,
 ): ChartDataPoint[] => {
-  const completedSessions = sessions.filter((session) => session.completed === true);
+  // Include completed sessions AND sessions with meaningful stats for chart
+  const sessionsToCount = sessions.filter((session) => {
+    if (session.completed === true) {
+      return true;
+    }
+    // Also count sessions that have meaningful stats (active sessions with progress)
+    if (session.stats) {
+      const hasHints = (session.stats.hintsUsed ?? 0) > 0;
+      const hasDuration = (session.stats.durationSec ?? 0) > 0;
+      return hasHints || hasDuration;
+    }
+    return false;
+  });
 
-  if (completedSessions.length === 0) {
+  if (sessionsToCount.length === 0) {
     // Return empty weeks
     return Array.from({ length: weeks }, (_, i) => ({
       label: `Week ${i + 1}`,
@@ -196,7 +222,7 @@ export const generateChartData = (
     const weekLabel = i === 0 ? 'This Week' : i === 1 ? 'Last Week' : `Week ${weeks - i}`;
 
     // Count sessions in this week
-    const sessionCount = completedSessions.filter((session) => {
+    const sessionCount = sessionsToCount.filter((session) => {
       const sessionDate = session.createdAt || session.lastUpdated;
       if (!sessionDate) return false;
 

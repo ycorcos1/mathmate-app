@@ -8,42 +8,75 @@ import type {
 
 export const PROBLEM_TOPICS: ProblemTopic[] = [
   {
-    id: 'arithmetic-fractions',
-    label: 'Fractions & Ratios',
-    description: 'Compare, add, or subtract fractions and ratios with real-world context.',
+    id: 'foundations',
+    label: 'Foundations',
+    description:
+      'Arithmetic, order of operations, factors, prime numbers, fractions, decimals, percentages, ratios, and exponents.',
     samplePrompt:
-      'Create a word problem involving comparing or adding fractions with unlike denominators.',
+      'Create a problem involving fractions, decimals, percentages, or ratios with real-world context.',
   },
   {
-    id: 'algebra-linear-equations',
-    label: 'Linear Equations',
-    description: 'Solve single-variable equations or systems of linear equations.',
-    samplePrompt: 'Craft an equation-solving problem where the student isolates the variable.',
-  },
-  {
-    id: 'algebra-quadratics',
-    label: 'Quadratic Expressions',
-    description: 'Factor, expand, or solve quadratic equations with reasoning.',
-    samplePrompt: 'Design a quadratic equation the student must solve by factoring.',
-  },
-  {
-    id: 'geometry-triangles',
-    label: 'Triangles & Angles',
-    description: 'Use triangle properties, similarity, or Pythagorean theorem.',
+    id: 'pre-algebra',
+    label: 'Pre-Algebra',
+    description:
+      'Integers, absolute value, expressions, variables, linear equations, inequalities, coordinate plane, and functions.',
     samplePrompt:
-      'Create a triangle problem requiring the Pythagorean theorem or angle relationships.',
+      'Craft a problem involving linear equations, inequalities, or expressions with variables.',
   },
   {
-    id: 'geometry-circles',
-    label: 'Circles & Arcs',
-    description: 'Work with circumference, area, sectors, or central angles.',
-    samplePrompt: 'Write a problem about finding an arc length or area of a sector.',
+    id: 'algebra',
+    label: 'Algebra I & II',
+    description:
+      'Systems of equations, quadratics, factoring, polynomials, rational expressions, radicals, exponential functions, sequences, and complex numbers.',
+    samplePrompt:
+      'Design a problem involving systems of equations, quadratics, factoring, or polynomials.',
   },
   {
-    id: 'calculus-derivatives',
-    label: 'Intro Calculus',
-    description: 'Differentiate or interpret rates of change using derivatives.',
-    samplePrompt: 'Propose a derivative application problem with a contextual scenario.',
+    id: 'geometry',
+    label: 'Geometry',
+    description:
+      'Points, lines, planes, angles, triangles, Pythagorean theorem, circles, polygons, coordinate geometry, perimeter, area, volume, transformations, and proofs.',
+    samplePrompt:
+      'Create a geometry problem involving triangles, circles, area, volume, or coordinate geometry.',
+  },
+  {
+    id: 'trigonometry',
+    label: 'Trigonometry',
+    description:
+      'Unit circle, sine, cosine, tangent, graphing trig functions, inverse functions, identities, law of sines/cosines, radians, and applications.',
+    samplePrompt: 'Write a problem involving trigonometric functions, identities, or applications.',
+  },
+  {
+    id: 'pre-calculus-calculus',
+    label: 'Pre-Calculus & Calculus',
+    description:
+      'Limits, continuity, derivatives, integrals, differential equations, parametric equations, polar equations, and infinite series.',
+    samplePrompt:
+      'Propose a calculus problem involving limits, derivatives, or integrals with applications.',
+  },
+  {
+    id: 'statistics-probability',
+    label: 'Statistics & Probability',
+    description:
+      'Mean, median, mode, variance, standard deviation, probability rules, conditional probability, combinations, permutations, distributions, and hypothesis testing.',
+    samplePrompt:
+      'Create a statistics or probability problem involving data analysis or probability calculations.',
+  },
+  {
+    id: 'discrete-math-logic',
+    label: 'Discrete Math & Logic',
+    description:
+      'Logic, truth tables, set theory, combinatorics, graph theory, counting principles, matrices, and recursion.',
+    samplePrompt:
+      'Design a discrete math problem involving logic, sets, combinatorics, or graph theory.',
+  },
+  {
+    id: 'applied-math',
+    label: 'Applied Math',
+    description:
+      'Word problems, financial math, rate/time/distance, geometry applications, data interpretation, and unit conversions.',
+    samplePrompt:
+      'Create a real-world applied math problem involving financial math, rates, or data interpretation.',
   },
 ];
 
@@ -87,4 +120,3 @@ export const getTopicLabel = (topicId: string | null | undefined): string | null
     .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
     .join(' ');
 };
-
