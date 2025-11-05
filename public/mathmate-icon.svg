@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="mathmateTitle">
+  <title id="mathmateTitle">MathMate Icon</title>
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4C91F7" />
+      <stop offset="100%" stop-color="#AEE8D1" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="12" fill="url(#grad)" />
+  <path d="M18 34h28" stroke="#ffffff" stroke-width="4" stroke-linecap="round" />
+  <path d="M32 20v24" stroke="#ffffff" stroke-width="4" stroke-linecap="round" />
+  <path d="M22 24c6 10 14 10 20 0" stroke="#ffffff" stroke-width="4" stroke-linecap="round" fill="none" />
+</svg>

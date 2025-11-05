@@ -1,0 +1,103 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&family=Poppins:wght@500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    font-family:
+      'Inter',
+      system-ui,
+      -apple-system,
+      BlinkMacSystemFont,
+      'Segoe UI',
+      sans-serif;
+    background-color: #fafafb;
+    color: #1f2937;
+  }
+
+  body {
+    @apply bg-brand-background text-brand-charcoal min-h-screen;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-heading text-brand-charcoal;
+  }
+
+  p,
+  span {
+    @apply font-body;
+  }
+
+  a {
+    @apply text-brand-sky underline-offset-4 hover:underline;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible {
+    @apply outline-none ring-2 ring-brand-sky ring-offset-2;
+  }
+}
+
+@keyframes typing {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+
+.typing-dot {
+  animation: typing 1.4s infinite;
+}
+
+.typing-dot:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* KaTeX equation styling for better readability */
+.katex-display {
+  margin: 0.75em 0 !important;
+}
+
+.katex {
+  font-size: 1.1em !important;
+  line-height: 1.6 !important;
+}
+
+.katex-display .katex {
+  font-size: 1.2em !important;
+  text-align: center;
+}
+
+/* Improve spacing in equations */
+.katex .mspace + .mbin,
+.katex .mbin + .mbin,
+.katex .mrel + .mbin {
+  margin-left: 0.4em;
+}
+
+/* Better number spacing */
+.katex .mord {
+  margin-right: 0.05em;
+}

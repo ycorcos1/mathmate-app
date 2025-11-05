@@ -1,0 +1,15 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Allow read access to uploaded files (for Vision API access)
+    // Signed URLs from getDownloadURL() should work, but we also allow public read
+    match /uploads/{userId}/{allPaths=**} {
+      allow read: if true; // Allow public read for Vision API
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
