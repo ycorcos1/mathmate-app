@@ -4,6 +4,8 @@
 
 MathMate is a web-based AI math tutor that guides students through problems using the Socratic method. By combining conversational tutoring, visual reasoning, and persistent session history, MathMate focuses on teaching _why_ solutions work rather than revealing final answers. Guided by the PRD and Design Specification, the product supports typed and image-based problem entry, KaTeX-rendered reasoning steps, and patient, confidence-building dialogue.
 
+MathMate features AI-powered question generation that creates diverse, contextually appropriate math problems based on topic and difficulty level. The Quiz Mode allows students to take timed quizzes with automatic evaluation, and review incorrect answers with AI-powered tutoring that provides step-by-step guidance.
+
 ## Setup Guide
 
 Follow this high-level sequence to prepare the project locally:
@@ -18,9 +20,9 @@ Follow this high-level sequence to prepare the project locally:
 
 - React for the frontend experience and component architecture.
 - Firebase (Auth, Firestore, Storage, Functions) for authentication, persistence, and secure API access.
-- OpenAI API for Socratic dialogue and vision-powered OCR.
+- OpenAI API for Socratic dialogue, vision-powered OCR, and AI-powered question generation.
 - KaTeX for accurate math rendering in chat and workspace views.
-- Tailwind CSS for the “Soft Academic” design system implementation.
+- Tailwind CSS for the "Soft Academic" design system implementation.
 - Vercel for hosting and deployment workflows.
 
 ## Project Structure

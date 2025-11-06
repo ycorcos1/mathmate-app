@@ -587,3 +587,131 @@ Implement analytics and tracking system to aggregate user performance metrics fr
 - Integrate session stats with mastery tracking engine (PR #14) to calculate progress.
 - Add analytics for session duration patterns and hint usage effectiveness.
 - Consider adding session archiving for completed sessions to reduce clutter.
+
+## 2025-01-XX — PR #12 / AI Question Generation
+
+**Goal:**
+Implement AI-powered question generation that creates diverse, contextually appropriate math problems based on topic selection and difficulty level.
+
+**Actions Taken:**
+
+- Created Firebase Cloud Function `generateProblem` (HTTPS) in `/functions/src/index.ts`:
+  - Integrated OpenAI API with GPT-4o-mini for question generation
+  - Implemented topic-specific guidance system with predefined topic prompts and subtopics
+  - Added difficulty-based guidance (beginner, intermediate, advanced)
+  - Configured CORS for client access
+  - Implemented request validation and error handling
+  - Set temperature to 0.85 for variety while maintaining quality
+  - Added diversity checking to prevent duplicate problems
+- Built client API utility (`src/api/generateProblem.ts`) to call the Cloud Function.
+- Created problem types and utilities (`src/types/problem.ts`, `src/utils/problemGenerator.ts`):
+  - Defined `ProblemTopic`, `ProblemDifficulty`, and `GeneratedProblem` types
+  - Implemented `PROBLEM_TOPICS` array with 9 major math topics
+  - Created `DIFFICULTY_OPTIONS` with descriptions for each level
+  - Added `generateProblem` function that calls the Cloud Function
+  - Implemented topic normalization and sanitization
+- Integrated question generation into Tutor page:
+  - Added topic and difficulty selectors to problem generation form
+  - Implemented problem diversity tracking using recent problems list
+  - Added automatic problem generation on topic/difficulty selection
+  - Enhanced problem text post-processing:
+    - Fixed angle formatting (e.g., "60 exto" → "60°")
+    - Fixed missing spaces between words (e.g., "andshehas" → "and she has")
+    - Fixed currency detection and dollar sign formatting
+    - Fixed word splitting issues (e.g., "organizing" not split as "or ganizing")
+- Implemented problem diversity enforcement:
+  - Checks for 3 identical problems in a row
+  - Checks for 6 identical problems in last 10
+  - Provides diversity warnings in prompt to encourage variety
+  - Uses recent problems list to avoid repetition
+
+**Decisions & Insights:**
+
+- Used OpenAI GPT-4o-mini for question generation to balance quality and cost-effectiveness.
+- Implemented topic-specific guidance system with predefined prompts and subtopics to ensure contextually appropriate problems.
+- Chose temperature of 0.85 to provide variety while maintaining problem quality and avoiding excessive randomness.
+- Added diversity checking to prevent repetitive problems, improving user experience and learning value.
+- Implemented comprehensive post-processing to fix common formatting issues (angles, spacing, currency, word splitting) that occur in AI-generated text.
+- Separated topic guidance into predefined prompts rather than dynamically generating, ensuring consistency and reliability.
+- Used Firestore to track recent problems for diversity checking, enabling cross-session problem variety.
+
+**Next Steps:**
+
+- Deploy `generateProblem` Cloud Function to production.
+- Monitor problem quality and diversity in production to refine prompts.
+- Add more topic-specific subtopics as needed for greater variety.
+- Consider adding user feedback mechanism for problem quality.
+- Implement problem difficulty calibration based on user performance.
+- Add support for multi-part problems in future iterations.
+
+## 2025-01-XX — PR #13 / Quiz Mode Feature
+
+**Goal:**
+Implement a comprehensive Quiz Mode feature that allows users to take timed quizzes, receive automatic evaluation, and review incorrect answers with AI-powered tutoring.
+
+**Actions Taken:**
+
+- Created Quiz page (`src/pages/Quiz.tsx`) with three phases:
+  - **Setup Phase**: Topic selection, difficulty selection, and question count configuration
+  - **Taking Phase**: Question interface with answer input, navigation between questions, and "Finish Quiz" button on last question
+  - **Review Phase**: Quiz summary with score, incorrect questions list, and AI-powered review for each incorrect answer
+- Implemented parallel question generation for faster loading:
+  - Uses `Promise.all()` to generate all questions simultaneously
+  - Significantly reduced quiz loading time compared to sequential generation
+- Created Firebase Cloud Function `evaluateQuizAnswer` (HTTPS) in `/functions/src/index.ts`:
+  - Integrated OpenAI API with GPT-4o-mini for answer evaluation
+  - Implemented structured evaluation with `isCorrect`, `correctAnswer`, `explanation`, and `feedback` fields
+  - Added fallback numerical validation to override OpenAI's judgment if numerical answers match
+  - Configured CORS for client access
+  - Set temperature to 0.1 for consistent, deterministic evaluation
+- Created quiz evaluation API (`src/api/evaluateQuizAnswer.ts`) to call the Cloud Function.
+- Implemented quiz statistics aggregation:
+  - Created `quizStatsAggregator.ts` utility to calculate total quizzes, average score, and recent score
+  - Created `useQuizStats` hook to fetch and aggregate quiz statistics from Firestore
+  - Integrated quiz statistics into Dashboard alongside session statistics
+- Added quiz mode parameter to problem generation:
+  - Extended `ProblemGenerationParams` type with optional `mode?: 'quiz' | 'tutor'`
+  - Updated `generateProblem` Cloud Function to accept mode parameter
+  - Quiz mode generates problems that only ask for final numerical answers (no equations/work required)
+  - Tutor mode maintains current behavior (can encourage thinking and showing work)
+- Implemented quiz data persistence:
+  - Stores quiz records in `/users/{uid}/quizzes` collection
+  - Stores quiz questions and responses in Firestore
+  - Tracks quiz metadata (topicId, difficulty, score, timestamp)
+- Added quiz review chat functionality:
+  - Similar to Tutor page chat interface
+  - Includes evaluation context (correct answer, explanation) in initial prompt
+  - Provides AI-powered step-by-step guidance for incorrect answers
+- Enhanced evaluation system:
+  - Extracts final numerical answer from equations (e.g., "25-8=17" → extracts "17")
+  - Compares numerical answers mathematically with tolerance for floating-point
+  - Overrides OpenAI's `isCorrect` judgment if numerical answers match
+  - Logs when evaluation is overridden for debugging
+- Fixed currency detection issues:
+  - Prevents dollar signs from appearing in quantity contexts (e.g., "has 24 pencils" not "$24 pencils")
+  - Handles "buy/buys" + number + quantity words correctly
+  - Improved detection of currency vs. quantity contexts
+- Fixed word splitting issues:
+  - Prevents words like "organizing" from being split as "or ganizing"
+  - Fixes concatenated words like "fictionbooksand9" → "fiction books and 9"
+  - Removes markdown asterisks from concatenated words
+
+**Decisions & Insights:**
+
+- Used parallel question generation (`Promise.all()`) to significantly reduce quiz loading time from sequential to parallel execution.
+- Implemented fallback numerical validation to ensure correct answers aren't marked wrong due to OpenAI inconsistencies, providing a safety net for evaluation accuracy.
+- Added quiz mode parameter to problem generation to differentiate quiz questions (final answer only) from tutor questions (can show work), improving quiz experience.
+- Created separate quiz statistics aggregation to track quiz-specific metrics independently from session statistics, providing clearer insights into quiz performance.
+- Used Firestore subcollections (`/users/{uid}/quizzes`) for quiz data persistence, maintaining clean data organization and enabling efficient queries.
+- Enhanced evaluation prompt with step-by-step instructions and concrete examples to improve evaluation accuracy and reduce false negatives.
+- Lowered evaluation temperature to 0.1 for more deterministic, consistent evaluation results.
+- Implemented comprehensive post-processing for problem text to fix common AI formatting issues (angles, spacing, currency, word splitting) before displaying to users.
+
+**Next Steps:**
+
+- Monitor evaluation accuracy in production and refine prompts if needed.
+- Add quiz difficulty calibration based on user performance patterns.
+- Consider adding quiz time tracking and time limits for timed quizzes.
+- Add quiz export functionality for user data portability.
+- Implement quiz analytics (e.g., topic performance, common mistakes).
+- Consider adding quiz sharing or collaboration features in future iterations.
