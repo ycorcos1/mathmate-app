@@ -8,6 +8,7 @@ import { PublicRoute } from './components/PublicRoute';
 const HomePage = lazy(() => import('./pages/Home'));
 const TutorPage = lazy(() => import('./pages/Tutor'));
 const DashboardPage = lazy(() => import('./pages/Dashboard'));
+const QuizPage = lazy(() => import('./pages/Quiz'));
 const LoginPage = lazy(() => import('./pages/Login'));
 const SignupPage = lazy(() => import('./pages/Signup'));
 const ForgotPasswordPage = lazy(() => import('./pages/ForgotPassword'));
@@ -36,6 +37,14 @@ const App = () => {
             element={
               <ProtectedRoute>
                 <DashboardPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/quiz"
+            element={
+              <ProtectedRoute>
+                <QuizPage />
               </ProtectedRoute>
             }
           />

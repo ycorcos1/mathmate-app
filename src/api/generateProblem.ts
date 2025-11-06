@@ -42,6 +42,7 @@ export const callGenerateProblem = async (
       topic: params.topicId ?? null,
       difficulty: params.difficulty ?? null,
       recentProblems: params.recentProblems ?? null,
+      mode: params.mode ?? 'tutor',
     }),
   });
 

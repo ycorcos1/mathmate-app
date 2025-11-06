@@ -61,6 +61,9 @@ export const AppLayout = ({ children }: { children: ReactNode }) => {
                 <NavLink to="/dashboard" className={navLinkClassName}>
                   Dashboard
                 </NavLink>
+                <NavLink to="/quiz" className={navLinkClassName}>
+                  Quiz
+                </NavLink>
                 <NavLink to="/tutor" className={navLinkClassName}>
                   Tutor
                 </NavLink>

@@ -4,6 +4,7 @@ export interface ProblemGenerationParams {
   topicId?: string;
   difficulty?: ProblemDifficulty;
   recentProblems?: Array<{ topicId: string; problemText: string; timestamp: number }>;
+  mode?: 'quiz' | 'tutor';
 }
 
 export interface GeneratedProblem {

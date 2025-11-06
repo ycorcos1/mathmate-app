@@ -23,6 +23,12 @@ const corsHandler = cors(corsOptions);
 type StepType = 'hint' | 'check' | 'final';
 type ResponseMode = 'default' | 'hint';
 type ProblemDifficulty = 'beginner' | 'intermediate' | 'advanced';
+type QuizEvaluationResponse = {
+  isCorrect: boolean;
+  correctAnswer?: string | null;
+  explanation?: string | null;
+  feedback?: string | null;
+};
 
 const DEFAULT_PROBLEM_DIFFICULTY: ProblemDifficulty = 'intermediate';
 
@@ -230,6 +236,15 @@ const sanitizeTopicId = (value: string): string =>
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '') || 'general';
 
+const sanitizeEvaluationField = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
 const BASE_SYSTEM_PROMPT = `You are MathMate, a Socratic math tutor. Your role is to GUIDE learners to discover solutions themselves, NEVER to solve problems for them.
 
 CRITICAL RULES:
@@ -258,6 +273,59 @@ const MODE_DIRECTIVES: Record<ResponseMode, string> = {
     'Current mode: standard guidance. Continue the dialogue by referencing the learner\'s latest response. IMPORTANT: Ask guiding questions, do NOT solve the problem. Do NOT provide complete solutions or final answers. Guide the learner to discover the solution themselves. Prefer "check" (guiding questions) unless the learner is stuck and needs a hint.',
   hint: 'Current mode: hint requested. Provide a concise hint that unlocks the next idea without solving the entire problem. Do not share the final answer. Set stepType to "hint" for this reply.',
 };
+
+const QUIZ_EVALUATION_SYSTEM_PROMPT = `You are MathMate, an expert math evaluator and tutor. Your job is to review a learner's answer and provide:
+
+1. Whether the answer is correct (true/false)
+2. The correct answer or final expression (succinctly)
+3. A brief explanation highlighting the key idea or mistake
+4. Friendly feedback encouraging the learner and pointing to the next step
+
+RESPOND STRICTLY WITH A JSON OBJECT USING THIS EXACT SHAPE:
+{
+  "isCorrect": true | false,
+  "correctAnswer": "<succinct final answer>",
+  "explanation": "<short explanation of the correct reasoning>",
+  "feedback": "<supportive coaching feedback>"
+}
+
+🚨 CRITICAL EVALUATION RULES FOR QUIZ MODE - READ THIS CAREFULLY:
+
+RULE 1: Calculate the problem yourself first to determine the correct numerical answer.
+  Example: "25 balloons, give away 8" → Correct answer is 17 (25 - 8 = 17)
+
+RULE 2: Extract ONLY the final numerical answer from the learner's response.
+  - If learner writes "17" → extracted answer = 17
+  - If learner writes "25-8=17" → extracted answer = 17 (number after =)
+  - If learner writes "25 - 8 = 17" → extracted answer = 17 (number after =)
+  - If learner writes "17." → extracted answer = 17
+  - Ignore everything else (equations, work, formatting) - only extract the final number
+
+RULE 3: Compare mathematically:
+  - If extracted answer = correct answer → mark isCorrect = TRUE
+  - If extracted answer ≠ correct answer → mark isCorrect = FALSE
+  - That's it. No other criteria.
+
+RULE 4: Examples showing CORRECT answers:
+  * Question: "25 balloons, give away 8, how many left?" (Correct: 17)
+    - Learner writes "17" → isCorrect = TRUE ✓
+    - Learner writes "25-8=17" → isCorrect = TRUE ✓
+    - Learner writes "25 - 8 = 17" → isCorrect = TRUE ✓
+    - Learner writes "16" → isCorrect = FALSE ✗
+
+RULE 5: Default to CORRECT if you're unsure.
+  - When in doubt, mark as CORRECT
+  - Only mark FALSE if you're absolutely certain the numerical answer is wrong
+  - Do NOT mark as incorrect for formatting, showing work, or any reason other than wrong numerical answer
+
+IMPORTANT: The ONLY thing that matters is whether the final numerical answer matches the correct answer. Everything else is irrelevant.
+
+Rules:
+- Keep explanations concise (2-4 sentences)
+- Provide the correct answer even if the learner was correct (for confirmation)
+- Feedback should be encouraging and actionable.
+- Do NOT include Markdown or LaTeX delimiters; plain text is fine.
+- If the question has multiple parts, summarize the correct resolution for each part.`;
 
 const isValidStepType = (value: unknown): value is StepType =>
   typeof value === 'string' && ['hint', 'check', 'final'].includes(value);
@@ -562,11 +630,14 @@ export const generateProblem = functions
         return;
       }
 
-      const { topic, difficulty, recentProblems } = req.body as {
+      const { topic, difficulty, recentProblems, mode } = req.body as {
         topic?: unknown;
         difficulty?: unknown;
         recentProblems?: Array<{ topicId: string; problemText: string; timestamp: number }> | null;
+        mode?: 'quiz' | 'tutor';
       };
+
+      const problemMode = mode === 'quiz' ? 'quiz' : 'tutor';
 
       const requestedTopic = normalizeTopicId(topic);
       const requestedDifficulty: ProblemDifficulty = isValidProblemDifficulty(difficulty)
@@ -638,8 +709,28 @@ ${relevantProblems
 7. Ensure each problem teaches a DIFFERENT aspect or variation of the topic${requestedTopic ? '' : '\n8. If no topic was specified, choose a DIFFERENT topic from recent problems'}`
           : '';
 
+      // Add mode-specific instructions
+      const modeInstructions =
+        problemMode === 'quiz'
+          ? `
+
+🚨 QUIZ MODE REQUIREMENTS:
+- The problem should ONLY ask for the FINAL NUMERICAL ANSWER
+- DO NOT ask the learner to "write an equation", "show your work", "explain your steps", or "set up an equation"
+- DO NOT ask them to "calculate this by finding the difference" or similar instructions
+- Simply ask "How many...?" or "What is...?" or similar direct questions
+- The learner will only provide the final answer (e.g., "5" or "8"), not work or equations
+- Example GOOD question: "Emma has 15 pencils. She gives away 7. How many pencils does she have left?"
+- Example BAD question: "Emma has 15 pencils. She gives away 7. Write an equation and solve to find how many pencils she has left."
+- Example BAD question: "Emma has 15 pencils. She gives away 7. Calculate this by finding the difference."
+- Keep the question focused on the mathematical scenario and the final answer needed`
+          : `
+🚨 TUTOR MODE (default):
+- You can encourage thinking and reasoning
+- The learner may show work or explain steps`;
+
       // Put diversity requirements FIRST in the system prompt
-      const systemContent = `${PROBLEM_GENERATOR_PROMPT}
+      const systemContent = `${PROBLEM_GENERATOR_PROMPT}${modeInstructions}
 
 🚨 CRITICAL DIVERSITY REQUIREMENTS (READ THIS FIRST):
 - Each problem must be MATHEMATICALLY and CONCEPTUALLY different from recent problems
@@ -652,6 +743,11 @@ ${relevantProblems
 Difficulty focus: ${PROBLEM_DIFFICULTY_GUIDANCE[requestedDifficulty]}
 Topic focus: ${topicGuidanceText}${subtopicsText}${topicDiversityWarning}${diversityWarning}${recentProblemsText}`;
 
+      const quizModeReminder =
+        problemMode === 'quiz'
+          ? `\n\n🚨 REMEMBER: This is QUIZ MODE - only ask for the final numerical answer. Do NOT ask for equations or work. Just ask "How many...?" or "What is...?"`
+          : '';
+
       const userContent = topicGuidance
         ? `Generate one ${requestedDifficulty} problem about ${topicGuidance.label}. 
 
@@ -662,7 +758,7 @@ Topic focus: ${topicGuidanceText}${subtopicsText}${topicDiversityWarning}${diver
 4. Use a DIFFERENT operation (if recent problems used division, use addition, subtraction, multiplication, etc.)
 5. Use a COMPLETELY DIFFERENT real-world context (not "apples" again - use books, money, distance, time, shapes, etc.)
 6. Do NOT create variations of the same problem - create a genuinely new problem that explores a different aspect of ${topicGuidance.label}
-7. The problem structure must be DIFFERENT from recent problems
+7. The problem structure must be DIFFERENT from recent problems${quizModeReminder}
 
 If you select a different but related topic, set topicId to a descriptive kebab-case label.`
         : `Generate one ${requestedDifficulty} math problem. 
@@ -674,7 +770,7 @@ If you select a different but related topic, set topicId to a descriptive kebab-
 4. Use a DIFFERENT operation (if recent problems used division, use addition, subtraction, multiplication, etc.)
 5. Use a COMPLETELY DIFFERENT real-world context (not "apples" repeatedly - use books, money, distance, time, shapes, etc.)
 6. The problem structure must be DIFFERENT from recent problems
-7. Set topicId to a descriptive kebab-case label matching the topic you choose`;
+7. Set topicId to a descriptive kebab-case label matching the topic you choose${quizModeReminder}`;
 
       try {
         const client = getOpenAIClient();
@@ -718,17 +814,381 @@ If you select a different but related topic, set topicId to a descriptive kebab-
         }
 
         // Post-process to fix common formatting issues
-        // Fix angle formatting - replace common malformed angle patterns
+        // STEP 1: Fix incorrect splits first (e.g., "or ganizing" -> "organizing")
+        // Fix common words that get incorrectly split
+        problemText = problemText
+          .replace(/\bor\s+ganizing\b/gi, 'organizing')
+          .replace(/\bor\s+ganize\b/gi, 'organize')
+          .replace(/\bor\s+ganized\b/gi, 'organized')
+          .replace(/\bor\s+ganization\b/gi, 'organization')
+          .replace(/\bre\s+alizing\b/gi, 'realizing')
+          .replace(/\bre\s+alize\b/gi, 'realize')
+          .replace(/\bre\s+alized\b/gi, 'realized')
+          .replace(/\bre\s+cognizing\b/gi, 'recognizing')
+          .replace(/\bre\s+cognize\b/gi, 'recognize')
+          .replace(/\bre\s+cognized\b/gi, 'recognized');
+
+        // STEP 2: Fix angle formatting - replace common malformed angle patterns
         problemText = problemText
           .replace(/(\d+)\s*exto\s*/gi, '$1° ') // Fix "60 exto" or "60exto" -> "60° "
           .replace(/(\d+)\s*degrees?\s*/gi, '$1° ') // Standardize "60 degrees" -> "60° "
           .replace(/(\d+)\s*deg\s*/gi, '$1° ') // Fix "60 deg" -> "60° "
           .replace(/(\d+)\s*°\s*/g, '$1° ') // Normalize spacing around degree symbol
           .replace(/([a-z])([A-Z])/g, '$1 $2') // Add space between camelCase words
+          // STEP 3: Fix missing spaces between words and numbers
           .replace(/(\d)([a-zA-Z])/g, '$1 $2') // Add space between number and letter (e.g., "7each" -> "7 each")
-          .replace(/([a-zA-Z])(\d)/g, '$1 $2') // Add space between letter and number
+          .replace(/([a-zA-Z])(\d)/g, '$1 $2') // Add space between letter and number (e.g., "has30" -> "has 30")
+          // STEP 4: Fix concatenated words with "and" + number (e.g., "*fictionbooksand9*" -> "fiction books and 9")
+          // Handle both with and without markdown asterisks
+          // Match pattern: word+books+and+number (e.g., "fictionbooksand9")
+          .replace(/\*?([a-z]+?)(books)(and)(\d+)\*?/gi, '$1 $2 $3 $4') // "*fictionbooksand9*" -> "fiction books and 9"
+          // Match pattern: word+book+and+number (e.g., "fictionbookand9")
+          .replace(/\*?([a-z]+?)(book)(and)(\d+)\*?/gi, '$1 $2 $3 $4') // "*fictionbookand9*" -> "fiction book and 9"
+          // Match pattern: word+books+space+and+number (e.g., "fiction booksand9")
+          .replace(/\*?([a-z]+)(books)(\s+)(and)(\d+)\*?/gi, '$1 $2 $3$4 $5') // "*fiction booksand9*" -> "fiction books and 9"
+          // STEP 5: Fix missing spaces between common words ONLY when clearly concatenated
+          .replace(
+            /\b(and|or)(she|he|they|we|you|it|the|a|an|this|that|these|those|has|have|had|is|are|was|were|can|will)\b/gi,
+            '$1 $2',
+          )
+          .replace(
+            /\b(she|he|they|we|you|it|the|a|an|this|that|these|those|has|have|had|is|are|was|were|can|will)(and|or)\b/gi,
+            '$1 $2',
+          )
+          // STEP 6: Fix common word concatenations (e.g., "fictionbooks" -> "fiction books")
+          .replace(/([a-z]+)(books|book)(\s|$|[^a-z])/gi, (match, prefix, word, after) => {
+            // Only split if it's clearly a concatenated word (like "fictionbooks")
+            // Common patterns: word + "books" or word + "book"
+            if (prefix.toLowerCase() === 'fiction' || prefix.toLowerCase() === 'nonfiction') {
+              return `${prefix} ${word}${after || ''}`;
+            }
+            // For other cases, check if prefix looks like a complete word + "s" or similar
+            if (prefix.length > 5 && prefix.endsWith('s')) {
+              const base = prefix.slice(0, -1);
+              // Only split if base is a reasonable word length
+              if (base.length > 3) {
+                return `${base} ${word}${after || ''}`;
+              }
+            }
+            return match;
+          })
           .replace(/\s+/g, ' ') // Normalize multiple spaces to single space
           .trim();
+
+        // Fix currency detection - add dollar signs before numbers in currency context
+        // Match patterns like "costs 5", "spend 30", "buy 5", "$5 and", "to spend 30", etc.
+        // BUT NOT for quantity contexts like "has 24 pencils", "has 5 books", etc.
+        problemText = problemText.replace(
+          /\b(?:costs?|spends?|pays?|spent|price|prices?|worth|total|dollars?)\s+(\d+)\b/gi,
+          (match, amount, offset) => {
+            // Check if there's already a dollar sign before this number
+            const beforeMatch = problemText.substring(0, offset);
+            const afterMatch = problemText.substring(offset + match.length);
+            const contextBefore = beforeMatch.slice(-30);
+            const contextAfter = afterMatch.slice(0, 30);
+
+            // If dollar sign already exists immediately before this number, don't add another
+            if (contextBefore.slice(-2) === '$' || beforeMatch.slice(-1) === '$') {
+              return match;
+            }
+
+            // Also check if this number is part of a math expression (don't add $ to equation numbers)
+            if (contextAfter.match(/^\s*[+\-*/=()]/) || contextBefore.match(/[+\-*/=()]\s*$/)) {
+              return match;
+            }
+
+            // Replace the amount with $amount
+            return match.replace(amount, `$${amount}`);
+          },
+        );
+
+        // Handle "has/have" - don't add $ if followed by quantity words (pencils, books, etc.)
+        problemText = problemText.replace(
+          /\b(has|have)\s+(\d+)\s+([a-z]+)/gi,
+          (match, verb, amount, nextWord, offset) => {
+            // Check if there's already a dollar sign before this number
+            const beforeMatch = problemText.substring(0, offset);
+            if (beforeMatch.slice(-1) === '$') {
+              return match;
+            }
+
+            // Common quantity words that should NOT have $ added
+            const quantityWords = [
+              'pencils',
+              'pencil',
+              'books',
+              'book',
+              'items',
+              'item',
+              'pieces',
+              'piece',
+              'objects',
+              'object',
+              'things',
+              'thing',
+              'students',
+              'student',
+              'people',
+              'pupils',
+              'pupil',
+              'children',
+              'child',
+            ];
+
+            // If followed by a quantity word, don't add $
+            if (quantityWords.includes(nextWord.toLowerCase())) {
+              return match;
+            }
+
+            // If followed by currency-related words, add $
+            const currencyWords = ['dollar', 'dollars', 'cent', 'cents', 'money', 'cash'];
+            if (currencyWords.includes(nextWord.toLowerCase())) {
+              return match.replace(amount, `$${amount}`);
+            }
+
+            // For other cases with "has/have", don't add $ to be safe
+            return match;
+          },
+        );
+
+        // Handle "buy/buys + number + more/quantity words" - don't add $ for quantity purchases
+        // This must come BEFORE the general "buy/buys" pattern to prevent false currency detection
+        problemText = problemText.replace(
+          /\b(buy|buys)\s+(\d+)\s+(more|additional|extra)\s+([a-z]+)/gi,
+          (match) => {
+            // Check if there's already a dollar sign - if so, remove it
+            if (match.includes('$')) {
+              return match.replace(/\$(\d+)/g, '$1');
+            }
+            return match;
+          },
+        );
+
+        // Handle "buy/buys + number + quantity words" - don't add $ for quantity purchases
+        problemText = problemText.replace(
+          /\b(buy|buys)\s+(\d+)\s+([a-z]+)/gi,
+          (match, verb, amount, nextWord, offset) => {
+            // Check if there's already a dollar sign - if so, remove it for quantity purchases
+            if (match.includes('$')) {
+              const quantityWords = [
+                'pencils',
+                'pencil',
+                'books',
+                'book',
+                'items',
+                'item',
+                'pieces',
+                'piece',
+                'objects',
+                'object',
+                'things',
+                'thing',
+                'students',
+                'student',
+                'people',
+                'pupils',
+                'pupil',
+                'children',
+                'child',
+                'stickers',
+                'sticker',
+                'apples',
+                'apple',
+                'oranges',
+                'orange',
+                'cookies',
+                'cookie',
+                'candies',
+                'candy',
+                'marbles',
+                'marble',
+                'coins',
+                'coin',
+                'stamps',
+                'stamp',
+                'cards',
+                'card',
+                'tickets',
+                'ticket',
+                'flowers',
+                'flower',
+                'trees',
+                'tree',
+                'cars',
+                'car',
+                'bikes',
+                'bike',
+                'toys',
+                'toy',
+                'games',
+                'game',
+              ];
+              if (quantityWords.includes(nextWord.toLowerCase())) {
+                return match.replace(/\$(\d+)/g, '$1');
+              }
+            }
+
+            const beforeMatch = problemText.substring(0, offset);
+            if (beforeMatch.slice(-1) === '$') {
+              return match;
+            }
+
+            // Common quantity words that should NOT have $ added
+            const quantityWords = [
+              'pencils',
+              'pencil',
+              'books',
+              'book',
+              'items',
+              'item',
+              'pieces',
+              'piece',
+              'objects',
+              'object',
+              'things',
+              'thing',
+              'students',
+              'student',
+              'people',
+              'pupils',
+              'pupil',
+              'children',
+              'child',
+              'stickers',
+              'sticker',
+              'apples',
+              'apple',
+              'oranges',
+              'orange',
+              'cookies',
+              'cookie',
+              'candies',
+              'candy',
+              'marbles',
+              'marble',
+              'coins',
+              'coin',
+              'stamps',
+              'stamp',
+              'cards',
+              'card',
+              'tickets',
+              'ticket',
+              'flowers',
+              'flower',
+              'trees',
+              'tree',
+              'cars',
+              'car',
+              'bikes',
+              'bike',
+              'toys',
+              'toy',
+              'games',
+              'game',
+            ];
+
+            // If followed by a quantity word, don't add $
+            if (quantityWords.includes(nextWord.toLowerCase())) {
+              return match;
+            }
+
+            // If followed by currency-related words, add $
+            const currencyWords = ['dollar', 'dollars', 'cent', 'cents', 'money', 'cash'];
+            if (currencyWords.includes(nextWord.toLowerCase())) {
+              return match.replace(amount, `$${amount}`);
+            }
+
+            // For other cases with "buy/buys", add $ to be safe (buying usually implies currency)
+            return match.replace(amount, `$${amount}`);
+          },
+        );
+
+        // Handle "buy/buys" without a following word (e.g., "buy 5" at end of sentence)
+        problemText = problemText.replace(
+          /\b(buy|buys)\s+\$?(\d+)(\s|$|[.,!?])/gi,
+          (match, verb, amount, after, offset) => {
+            const beforeMatch = problemText.substring(0, offset);
+            if (beforeMatch.slice(-1) === '$') {
+              return match;
+            }
+            // Check context before the match to see if it's likely a quantity
+            const contextBefore = problemText.substring(Math.max(0, offset - 20), offset);
+            // If preceded by "more" or quantity words, remove $ if present
+            if (contextBefore.match(/\b(more|additional|extra)\s+(buy|buys)\s*$/i)) {
+              return match.replace(/\$(\d+)/g, '$1');
+            }
+            // Otherwise, add $ for buying (usually implies currency) if not already present
+            if (!match.includes('$')) {
+              return match.replace(amount, `$${amount}`);
+            }
+            return match;
+          },
+        );
+
+        // Also fix currency at start of sentences or after certain punctuation
+        problemText = problemText.replace(
+          /(?:^|\. |, |\? |! )(\d+)\s+(?:and|or|to|costs?|spends?|buy|buys?)(?:\s+([a-z]+))?/gi,
+          (match, amount, nextWord) => {
+            // Check if it's already a currency
+            if (match.includes('$')) {
+              // If followed by quantity words, remove the $
+              if (nextWord) {
+                const quantityWords = [
+                  'more',
+                  'pencils',
+                  'pencil',
+                  'books',
+                  'book',
+                  'items',
+                  'item',
+                  'pieces',
+                  'piece',
+                  'objects',
+                  'object',
+                  'things',
+                  'thing',
+                  'students',
+                  'student',
+                  'people',
+                  'stickers',
+                  'sticker',
+                ];
+                if (quantityWords.includes(nextWord.toLowerCase())) {
+                  return match.replace(/\$(\d+)/g, '$1');
+                }
+              }
+              return match;
+            }
+            // If followed by quantity words, don't add $
+            if (nextWord) {
+              const quantityWords = [
+                'more',
+                'pencils',
+                'pencil',
+                'books',
+                'book',
+                'items',
+                'item',
+                'pieces',
+                'piece',
+                'objects',
+                'object',
+                'things',
+                'thing',
+                'students',
+                'student',
+                'people',
+                'stickers',
+                'sticker',
+              ];
+              if (quantityWords.includes(nextWord.toLowerCase())) {
+                return match;
+              }
+            }
+            return match.replace(amount, `$${amount}`);
+          },
+        );
 
         // Fix malformed currency/LaTeX patterns
         // Pattern: number followed by $$ (not part of valid $$...$$ block) - likely malformed currency
@@ -752,7 +1212,6 @@ If you select a different but related topic, set topicId to a descriptive kebab-
         // This handles cases where $$ appears alone or malformed
         problemText = problemText.replace(/([^$])\$\$([^$]|$)/g, (match, before, after) => {
           // Check if this is part of a valid $$...$$ block
-          const textBefore = problemText.substring(0, problemText.indexOf(match));
           const textAfter = problemText.substring(problemText.indexOf(match) + match.length);
           const hasClosingDollar = textAfter.includes('$$');
 
@@ -808,5 +1267,194 @@ If you select a different but related topic, set topicId to a descriptive kebab-
         console.error('generateProblem failed', error);
         res.status(500).json({ error: 'Failed to generate problem.' });
       }
+    });
+  });
+
+export const evaluateQuizAnswer = functions
+  .region('us-central1')
+  .runWith({
+    timeoutSeconds: 120,
+    memory: '256MB',
+    secrets: ['OPENAI_API_KEY'],
+  })
+  .https.onRequest((req, res) => {
+    // Handle OPTIONS preflight request first with CORS headers
+    if (req.method === 'OPTIONS') {
+      const origin = req.headers.origin;
+      if (origin) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+      } else {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+      }
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Access-Control-Max-Age', '3600');
+      res.status(204).end();
+      return;
+    }
+
+    corsHandler(req, res, () => {
+      if (req.method !== 'POST') {
+        res.status(405).json({ error: 'Method not allowed' });
+        return;
+      }
+
+      const { question, userAnswer, difficulty } = req.body as {
+        question?: unknown;
+        userAnswer?: unknown;
+        difficulty?: unknown;
+      };
+
+      if (typeof question !== 'string' || question.trim().length === 0) {
+        res.status(400).json({ error: 'Question is required.' });
+        return;
+      }
+
+      const trimmedQuestion = question.trim();
+      const trimmedAnswer = typeof userAnswer === 'string' ? userAnswer.trim() : '';
+      const requestedDifficulty: ProblemDifficulty = isValidProblemDifficulty(difficulty)
+        ? (difficulty as ProblemDifficulty)
+        : DEFAULT_PROBLEM_DIFFICULTY;
+
+      (async () => {
+        try {
+          const client = getOpenAIClient();
+          const completion = await client.chat.completions.create({
+            model: 'gpt-4o-mini',
+            temperature: 0.1,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: QUIZ_EVALUATION_SYSTEM_PROMPT },
+              {
+                role: 'user',
+                content: `Evaluate the learner's response and provide structured feedback.
+
+IMPORTANT: Calculate the problem yourself step-by-step to verify the correct answer before evaluating the learner's response.
+
+Question:
+${trimmedQuestion}
+
+Learner answer:
+${trimmedAnswer || '(no answer provided)'}
+
+Difficulty: ${requestedDifficulty}.
+
+QUIZ MODE EVALUATION PROCESS - FOLLOW THESE STEPS EXACTLY:
+
+STEP 1: Calculate the problem yourself to determine the correct answer.
+  Example: "Liam has 25 balloons. He gives away 8. How many does he have left?"
+  Correct answer: 25 - 8 = 17
+
+STEP 2: Extract the FINAL NUMERICAL ANSWER from the learner's response:
+  - If they wrote just a number (e.g., "17"), use that number → 17
+  - If they wrote an equation (e.g., "25-8=17", "25 - 8 = 17"), extract the number AFTER the equals sign → 17
+  - If they wrote multiple numbers, use the LAST number (the final answer)
+
+STEP 3: Compare mathematically:
+  - If extracted number = correct answer → mark isCorrect as TRUE
+  - If extracted number ≠ correct answer → mark isCorrect as FALSE
+
+CRITICAL: If the numbers match, it's CORRECT. Do NOT mark as incorrect for formatting, showing work, or any other reason.
+
+EXAMPLES:
+- Question: "Liam has 25 balloons. He gives away 8. How many left?" (Correct: 17)
+  * Learner writes "17" → isCorrect = TRUE (17 = 17)
+  * Learner writes "25-8=17" → isCorrect = TRUE (extract 17, 17 = 17)
+  * Learner writes "25 - 8 = 17" → isCorrect = TRUE (extract 17, 17 = 17)
+  * Learner writes "17." → isCorrect = TRUE (extract 17, 17 = 17)
+  * Learner writes "16" → isCorrect = FALSE (16 ≠ 17)
+
+- Question: "How many more friends does Sarah need to invite?" (Correct: 5)
+  * Learner writes "5" → isCorrect = TRUE (5 = 5)
+  * Learner writes "8-3=5" → isCorrect = TRUE (extract 5, 5 = 5)
+  * Learner writes "8 - 3 = 5" → isCorrect = TRUE (extract 5, 5 = 5)
+  * Learner writes "8-3=3" → isCorrect = FALSE (extract 3, 3 ≠ 5)
+
+REMEMBER: 
+- The goal is to check if the learner got the RIGHT ANSWER
+- If the final numerical answer matches, mark it as CORRECT
+- Do NOT mark as incorrect unless the final numerical answer is mathematically wrong
+- When in doubt, mark as CORRECT`,
+              },
+            ],
+          });
+
+          const rawContent = completion.choices[0]?.message?.content?.trim();
+
+          if (!rawContent) {
+            res.status(500).json({ error: 'No evaluation returned from OpenAI.' });
+            return;
+          }
+
+          let parsed: unknown;
+
+          try {
+            parsed = JSON.parse(rawContent) as QuizEvaluationResponse;
+          } catch (parseError) {
+            console.error('Failed to parse quiz evaluation JSON', parseError, rawContent);
+            res.status(500).json({ error: 'Malformed evaluation response returned from OpenAI.' });
+            return;
+          }
+
+          const parsedRecord =
+            parsed && typeof parsed === 'object'
+              ? (parsed as Partial<QuizEvaluationResponse>)
+              : ({} as Partial<QuizEvaluationResponse>);
+
+          let isCorrect = parsedRecord.isCorrect === true;
+          const correctAnswer = sanitizeEvaluationField(parsedRecord.correctAnswer);
+          const explanation = sanitizeEvaluationField(parsedRecord.explanation);
+          const feedback = sanitizeEvaluationField(parsedRecord.feedback);
+
+          // FALLBACK VALIDATION: Extract and compare numerical answers
+          // This ensures correct answers aren't marked wrong due to OpenAI inconsistencies
+          const extractNumericAnswer = (answer: string): number | null => {
+            if (!answer || typeof answer !== 'string') {
+              return null;
+            }
+            // Try to find number after = (for equations like "25-8=17" or "25 - 8 = 17")
+            const equationMatch = answer.match(/=\s*(\d+(?:\.\d+)?)/);
+            if (equationMatch) {
+              const num = Number.parseFloat(equationMatch[1]);
+              return Number.isFinite(num) ? num : null;
+            }
+            // Try to find standalone number (last number in the string)
+            const numberMatches = answer.match(/(-?\d+(?:\.\d+)?)/g);
+            if (numberMatches && numberMatches.length > 0) {
+              // Use the last number (usually the final answer)
+              const lastNum = Number.parseFloat(numberMatches[numberMatches.length - 1]);
+              return Number.isFinite(lastNum) ? lastNum : null;
+            }
+            return null;
+          };
+
+          const userNumericAnswer = extractNumericAnswer(trimmedAnswer);
+          const correctNumericAnswer = correctAnswer ? extractNumericAnswer(correctAnswer) : null;
+
+          // If both numerical answers can be extracted and they match, override OpenAI's judgment
+          if (userNumericAnswer !== null && correctNumericAnswer !== null) {
+            // Compare with small tolerance for floating point numbers
+            if (Math.abs(userNumericAnswer - correctNumericAnswer) < 0.001) {
+              if (!isCorrect) {
+                console.log(
+                  `[evaluateQuizAnswer] Overriding OpenAI evaluation: User answer ${userNumericAnswer} matches correct answer ${correctNumericAnswer}. Question: "${trimmedQuestion.substring(0, 100)}..."`,
+                );
+              }
+              isCorrect = true;
+            }
+          }
+
+          res.status(200).json({
+            isCorrect,
+            correctAnswer,
+            explanation,
+            feedback,
+          });
+        } catch (error) {
+          console.error('evaluateQuizAnswer failed', error);
+          res.status(500).json({ error: 'Failed to evaluate quiz answer.' });
+        }
+      })();
     });
   });

@@ -18,6 +18,7 @@ import { firestore } from '../firebase';
 import { ProtectedRoute } from '../components/ProtectedRoute';
 import { useUserDoc } from '../hooks/useUserDoc';
 import { useSessionStats } from '../hooks/useSessionStats';
+import { useQuizStats } from '../hooks/useQuizStats';
 import { useUserStatsSync } from '../hooks/useUserStatsSync';
 import { formatDuration, formatRelativeTime } from '../utils/formatters';
 import type { SessionSummary } from '../utils/statsAggregator';
@@ -58,6 +59,8 @@ const DashboardContent = () => {
     loading: statsLoading,
     error: statsError,
   } = useSessionStats();
+
+  const { stats: quizStats, loading: quizLoading, error: quizError } = useQuizStats();
 
   // Sync aggregated stats to user document
   useUserStatsSync();
@@ -260,9 +263,18 @@ const DashboardContent = () => {
         </div>
       </header>
 
-      {statsError && (
-        <div className="mt-6 rounded-xl border border-brand-coral/40 bg-[#FEE2E2] px-4 py-3 text-sm text-brand-charcoal">
-          Failed to load statistics. Please refresh the page.
+      {(statsError || quizError) && (
+        <div className="mt-6 space-y-2">
+          {statsError ? (
+            <div className="rounded-xl border border-brand-coral/40 bg-[#FEE2E2] px-4 py-3 text-sm text-brand-charcoal">
+              Failed to load session statistics. Please refresh the page.
+            </div>
+          ) : null}
+          {quizError ? (
+            <div className="rounded-xl border border-brand-coral/40 bg-[#FEE2E2] px-4 py-3 text-sm text-brand-charcoal">
+              Failed to load quiz statistics. Please refresh the page.
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -312,6 +324,50 @@ const DashboardContent = () => {
               {lastActiveDate ? formatRelativeTime(lastActiveDate) : '—'}
             </p>
           )}
+        </div>
+      </section>
+
+      <section className="mt-6 grid gap-6 md:grid-cols-3">
+        <div className="rounded-2xl border border-brand-mint/60 bg-white p-6 shadow-subtle">
+          <p className="text-sm text-brand-slate">Total Quizzes</p>
+          {quizLoading ? (
+            <p className="mt-2 text-3xl font-semibold text-brand-charcoal">—</p>
+          ) : (
+            <p className="mt-2 text-3xl font-semibold text-brand-charcoal">
+              {quizStats.totalQuizzes}
+            </p>
+          )}
+          <p className="mt-4 text-xs uppercase tracking-wide text-brand-slate">
+            Attempts Completed
+          </p>
+        </div>
+        <div className="rounded-2xl border border-brand-mint/60 bg-white p-6 shadow-subtle">
+          <p className="text-sm text-brand-slate">Average Quiz Score</p>
+          {quizLoading ? (
+            <p className="mt-2 text-3xl font-semibold text-brand-charcoal">—</p>
+          ) : (
+            <p className="mt-2 text-3xl font-semibold text-brand-charcoal">
+              {quizStats.totalQuizzes > 0 ? `${quizStats.averageScore.toFixed(1)}%` : '—'}
+            </p>
+          )}
+          <p className="mt-4 text-xs uppercase tracking-wide text-brand-slate">
+            Across All Quizzes
+          </p>
+        </div>
+        <div className="rounded-2xl border border-brand-mint/60 bg-white p-6 shadow-subtle">
+          <p className="text-sm text-brand-slate">Last Quiz Score</p>
+          {quizLoading ? (
+            <p className="mt-2 text-3xl font-semibold text-brand-charcoal">—</p>
+          ) : (
+            <p className="mt-2 text-3xl font-semibold text-brand-charcoal">
+              {quizStats.recentScore !== null && quizStats.totalQuizzes > 0
+                ? `${quizStats.recentScore.toFixed(1)}%`
+                : '—'}
+            </p>
+          )}
+          <p className="mt-4 text-xs uppercase tracking-wide text-brand-slate">
+            Most Recent Result
+          </p>
         </div>
       </section>
 

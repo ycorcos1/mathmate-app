@@ -1152,7 +1152,7 @@ const TutorPage = () => {
 
       // Context retention: Log context size for monitoring
       // Future enhancement: Summarize older messages if conversation exceeds ~20 messages
-      const contextSize = payload.length;
+      // const contextSize = payload.length;
 
       // Use streaming for better UX
       let streamingContent = '';
